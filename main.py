@@ -6,7 +6,7 @@ from supabase import create_client, Client
 
 app = FastAPI(title="API Consolidador PEP - SESAP")
 
-# Habilita CORS para o Lovable conseguir conversar com a API
+# Habilita CORS
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -27,19 +27,21 @@ def home():
 @app.post("/processar-pep")
 async def processar_pep(file: UploadFile = File(...)):
     try:
-        # 1. Puxa Dicionário do Supabase
-        response = supabase.table('dim_setores_hjpb').select('nome_setor_pep, dim_cc_pngc(nome_cc)').execute()
+        # 1. Puxa Dicionário do Supabase (Agora puxando o ID do setor e a coluna 'nome' correta)
+        response = supabase.table('dim_setores_hjpb').select('id, nome_setor_pep, dim_cc_pngc(nome)').execute()
         
         if not response.data:
             return {"sucesso": False, "erro": "Não foi possível carregar a tabela dim_setores_hjpb do Supabase."}
         
         df_depara = pd.DataFrame(response.data)
+        
+        # Mapeando os nomes oficiais do CC e garantindo caixa alta no De-Para
         df_depara['nome_cc_oficial'] = df_depara['dim_cc_pngc'].apply(
-            lambda x: x.get('nome_cc') if isinstance(x, dict) else (x[0].get('nome_cc') if isinstance(x, list) and len(x) > 0 else 'Sem Nome')
+            lambda x: x.get('nome') if isinstance(x, dict) else (x[0].get('nome') if isinstance(x, list) and len(x) > 0 else 'Sem Nome')
         )
         df_depara['nome_setor_pep'] = df_depara['nome_setor_pep'].astype(str).str.strip().str.upper()
 
-        # 2. Leitura com Pandas (robusto contra células mescladas e vazias)
+        # 2. Leitura do Excel com Pandas
         conteudo = await file.read()
         df_bruto = pd.read_excel(io.BytesIO(conteudo), skiprows=4)
 
@@ -61,9 +63,12 @@ async def processar_pep(file: UploadFile = File(...)):
         df_cruzado = pd.merge(df_limpo, df_depara, left_on='Setor PEP', right_on='nome_setor_pep', how='inner')
         
         item_prod = 'Paciente-Dia' if 'internados' in str(file.filename).lower() else 'Atendimentos'
+        
+        # Agrupa pelo nome oficial e soma a quantidade
         df_final = df_cruzado.groupby('nome_cc_oficial', as_index=False)['Quantidade'].sum()
         df_final['Item de Produção'] = item_prod
 
+        # Formata o JSON de saída para o Lovable
         resultados = df_final.rename(
             columns={'nome_cc_oficial': 'cc_pngc', 'Item de Produção': 'item_producao', 'Quantidade': 'quantidade'}
         ).to_dict(orient='records')
