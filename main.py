@@ -25,15 +25,14 @@ def home():
 @app.post("/processar-pep")
 async def processar_pep(file: UploadFile = File(...)):
     try:
-        # 1. Puxa o Dicionário solicitando também a nova coluna 'item_producao_padrao'
+        # 1. Puxa Dicionário do Supabase
         response = supabase.table('dim_setores_hjpb').select('id, nome_setor_pep, dim_cc_pngc(nome, item_producao_padrao)').execute()
         
         if not response.data:
-            return {"sucesso": False, "erro": "Não foi possível carregar a tabela dim_setores_hjpb do Supabase."}
+            return {"sucesso": False, "erro": "Não foi possível carregar o dicionário do Supabase."}
         
         df_depara = pd.DataFrame(response.data)
         
-        # Função auxiliar para extrair dados aninhados do Supabase
         def extrair_dado_cc(x, chave):
             if isinstance(x, dict):
                 return x.get(chave)
@@ -41,33 +40,56 @@ async def processar_pep(file: UploadFile = File(...)):
                 return x[0].get(chave)
             return 'Não Informado'
 
-        # Extrai o nome e o item de produção oficial do banco de dados
         df_depara['nome_cc_oficial'] = df_depara['dim_cc_pngc'].apply(lambda x: extrair_dado_cc(x, 'nome'))
         df_depara['item_producao'] = df_depara['dim_cc_pngc'].apply(lambda x: extrair_dado_cc(x, 'item_producao_padrao'))
         df_depara['nome_setor_pep'] = df_depara['nome_setor_pep'].astype(str).str.strip().str.upper()
 
-        # 2. Leitura com Pandas
+        # 2. Leitura Inteligente do Arquivo
         conteudo = await file.read()
-        df_bruto = pd.read_excel(io.BytesIO(conteudo), skiprows=4)
+        
+        # Lemos primeiro sem pular linhas para DESCOBRIR onde o cabeçalho está
+        df_temp = pd.read_excel(io.BytesIO(conteudo), header=None)
+        
+        header_idx = 4 # Fallback padrão
+        for idx, row in df_temp.iterrows():
+            row_str = ' '.join(str(val).upper() for val in row.values)
+            if 'SETOR' in row_str or 'UNIDADE' in row_str:
+                header_idx = idx
+                break
+                
+        # Agora lemos pulando a quantidade exata de lixo do cabeçalho
+        df_bruto = pd.read_excel(io.BytesIO(conteudo), skiprows=header_idx)
 
+        # Acha a coluna do Setor
         col_setor = next((c for c in df_bruto.columns if 'SETOR' in str(c).upper() or 'UNIDADE' in str(c).upper()), df_bruto.columns[0])
-        col_valor = df_bruto.columns[-1]
+        
+        # Acha a coluna do Valor com Fuzzy Match (busca elástica)
+        col_valor = None
+        for c in df_bruto.columns:
+            c_upper = str(c).upper()
+            if any(palavra in c_upper for palavra in ['PERMANÊNCIA', 'PERMANENCIA', 'PACIENTE', 'DIA', 'MÉDIA']):
+                col_valor = c
+                break
+            elif any(palavra in c_upper for palavra in ['REALIZADO', 'ATENDIMENTO', 'ATENDIDOS']):
+                col_valor = c
+                break
+                
+        # Se mesmo assim não achar a palavra exata, pega a última coluna com valores numéricos
+        if not col_valor:
+            col_valor = df_bruto.columns[-1]
 
+        # 3. Limpeza
         df_limpo = pd.DataFrame({
             'Setor PEP': df_bruto[col_setor].astype(str).str.strip().str.upper(),
             'Quantidade': pd.to_numeric(df_bruto[col_valor], errors='coerce')
         }).dropna(subset=['Setor PEP', 'Quantidade'])
 
-        # 3. Poka-Yoke: Identificação de Órfãos
+        # 4. Cruzamento Poka-Yoke
         setores_planilha = df_limpo['Setor PEP'].unique()
         setores_banco = df_depara['nome_setor_pep'].unique()
-        
         orfaos = [s for s in setores_planilha if s not in setores_banco and s not in ['TOTAIS', 'NAN', 'TOTAL', '']]
 
-        # 4. Cruzamento e Agrupamento
         df_cruzado = pd.merge(df_limpo, df_depara, left_on='Setor PEP', right_on='nome_setor_pep', how='inner')
-        
-        # O Agrupamento agora leva em consideração o Item de Produção vindo do Supabase
         df_final = df_cruzado.groupby(['nome_cc_oficial', 'item_producao'], as_index=False)['Quantidade'].sum()
 
         resultados = df_final.rename(
