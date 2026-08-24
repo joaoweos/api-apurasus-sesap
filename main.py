@@ -6,7 +6,6 @@ from supabase import create_client, Client
 
 app = FastAPI(title="API Consolidador PEP - SESAP")
 
-# Habilita CORS
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -15,7 +14,6 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# Credenciais do Supabase
 SUPABASE_URL = "https://eacnghcsrajvluiuoqvm.supabase.co"
 SUPABASE_KEY = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImVhY25naGNzcmFqdmx1aXVvcXZtIiwicm9sZSI6ImFub24iLCJpYXQiOjE3ODYwMTQxNDQsImV4cCI6MjEwMTU5MDE0NH0.U6lM5gB9um6VRuDDP04hvc74aSOB1_aIG0Nn4onomM8"
 supabase: Client = create_client(SUPABASE_URL, SUPABASE_KEY)
@@ -27,21 +25,28 @@ def home():
 @app.post("/processar-pep")
 async def processar_pep(file: UploadFile = File(...)):
     try:
-        # 1. Puxa Dicionário do Supabase (Agora puxando o ID do setor e a coluna 'nome' correta)
-        response = supabase.table('dim_setores_hjpb').select('id, nome_setor_pep, dim_cc_pngc(nome)').execute()
+        # 1. Puxa o Dicionário solicitando também a nova coluna 'item_producao_padrao'
+        response = supabase.table('dim_setores_hjpb').select('id, nome_setor_pep, dim_cc_pngc(nome, item_producao_padrao)').execute()
         
         if not response.data:
             return {"sucesso": False, "erro": "Não foi possível carregar a tabela dim_setores_hjpb do Supabase."}
         
         df_depara = pd.DataFrame(response.data)
         
-        # Mapeando os nomes oficiais do CC e garantindo caixa alta no De-Para
-        df_depara['nome_cc_oficial'] = df_depara['dim_cc_pngc'].apply(
-            lambda x: x.get('nome') if isinstance(x, dict) else (x[0].get('nome') if isinstance(x, list) and len(x) > 0 else 'Sem Nome')
-        )
+        # Função auxiliar para extrair dados aninhados do Supabase
+        def extrair_dado_cc(x, chave):
+            if isinstance(x, dict):
+                return x.get(chave)
+            elif isinstance(x, list) and len(x) > 0:
+                return x[0].get(chave)
+            return 'Não Informado'
+
+        # Extrai o nome e o item de produção oficial do banco de dados
+        df_depara['nome_cc_oficial'] = df_depara['dim_cc_pngc'].apply(lambda x: extrair_dado_cc(x, 'nome'))
+        df_depara['item_producao'] = df_depara['dim_cc_pngc'].apply(lambda x: extrair_dado_cc(x, 'item_producao_padrao'))
         df_depara['nome_setor_pep'] = df_depara['nome_setor_pep'].astype(str).str.strip().str.upper()
 
-        # 2. Leitura do Excel com Pandas
+        # 2. Leitura com Pandas
         conteudo = await file.read()
         df_bruto = pd.read_excel(io.BytesIO(conteudo), skiprows=4)
 
@@ -62,15 +67,11 @@ async def processar_pep(file: UploadFile = File(...)):
         # 4. Cruzamento e Agrupamento
         df_cruzado = pd.merge(df_limpo, df_depara, left_on='Setor PEP', right_on='nome_setor_pep', how='inner')
         
-        item_prod = 'Paciente-Dia' if 'internados' in str(file.filename).lower() else 'Atendimentos'
-        
-        # Agrupa pelo nome oficial e soma a quantidade
-        df_final = df_cruzado.groupby('nome_cc_oficial', as_index=False)['Quantidade'].sum()
-        df_final['Item de Produção'] = item_prod
+        # O Agrupamento agora leva em consideração o Item de Produção vindo do Supabase
+        df_final = df_cruzado.groupby(['nome_cc_oficial', 'item_producao'], as_index=False)['Quantidade'].sum()
 
-        # Formata o JSON de saída para o Lovable
         resultados = df_final.rename(
-            columns={'nome_cc_oficial': 'cc_pngc', 'Item de Produção': 'item_producao', 'Quantidade': 'quantidade'}
+            columns={'nome_cc_oficial': 'cc_pngc', 'Quantidade': 'quantidade'}
         ).to_dict(orient='records')
 
         return {"sucesso": True, "orfaos": orfaos, "resultados": resultados}
