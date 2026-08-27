@@ -1,5 +1,6 @@
 from fastapi import FastAPI, File, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
+from typing import List
 import pandas as pd
 import io
 from supabase import create_client, Client
@@ -23,9 +24,8 @@ def home():
     return {"status": "online", "projeto": "SESAP ApuraSUS Engine"}
 
 @app.post("/processar-pep")
-async def processar_pep(file: UploadFile = File(...)):
+async def processar_pep(files: List[UploadFile] = File(...)):
     try:
-        # 1. Puxa Dicionário do Supabase
         response = supabase.table('dim_setores_hjpb').select('id, nome_setor_pep, dim_cc_pngc(nome, item_producao_padrao)').execute()
         
         if not response.data:
@@ -44,53 +44,65 @@ async def processar_pep(file: UploadFile = File(...)):
         df_depara['item_producao'] = df_depara['dim_cc_pngc'].apply(lambda x: extrair_dado_cc(x, 'item_producao_padrao'))
         df_depara['nome_setor_pep'] = df_depara['nome_setor_pep'].astype(str).str.strip().str.upper()
 
-        # 2. Leitura Inteligente do Arquivo
-        conteudo = await file.read()
-        
-        # Lemos primeiro sem pular linhas para DESCOBRIR onde o cabeçalho está
-        df_temp = pd.read_excel(io.BytesIO(conteudo), header=None)
-        
-        header_idx = 4 # Fallback padrão
-        for idx, row in df_temp.iterrows():
-            row_str = ' '.join(str(val).upper() for val in row.values)
-            if 'SETOR' in row_str or 'UNIDADE' in row_str:
-                header_idx = idx
-                break
-                
-        # Agora lemos pulando a quantidade exata de lixo do cabeçalho
-        df_bruto = pd.read_excel(io.BytesIO(conteudo), skiprows=header_idx)
+        dfs_limpos = []
 
-        # Acha a coluna do Setor
-        col_setor = next((c for c in df_bruto.columns if 'SETOR' in str(c).upper() or 'UNIDADE' in str(c).upper()), df_bruto.columns[0])
-        
-        # Acha a coluna do Valor com Fuzzy Match (busca elástica)
-        col_valor = None
-        for c in df_bruto.columns:
-            c_upper = str(c).upper()
-            if any(palavra in c_upper for palavra in ['PERMANÊNCIA', 'PERMANENCIA', 'PACIENTE', 'DIA', 'MÉDIA']):
-                col_valor = c
-                break
-            elif any(palavra in c_upper for palavra in ['REALIZADO', 'ATENDIMENTO', 'ATENDIDOS']):
-                col_valor = c
-                break
-                
-        # Se mesmo assim não achar a palavra exata, pega a última coluna com valores numéricos
-        if not col_valor:
-            col_valor = df_bruto.columns[-1]
+        # 1. Leitura com Tag de Origem
+        for file in files:
+            conteudo = await file.read()
+            filename = str(file.filename).lower()
+            
+            df_temp = pd.read_excel(io.BytesIO(conteudo), header=None)
+            
+            header_idx = 4
+            for idx, row in df_temp.iterrows():
+                row_str = ' '.join(str(val).upper() for val in row.values)
+                if 'SETOR' in row_str or 'UNIDADE' in row_str:
+                    header_idx = idx
+                    break
+                    
+            df_bruto = pd.read_excel(io.BytesIO(conteudo), skiprows=header_idx)
+            col_setor = next((c for c in df_bruto.columns if 'SETOR' in str(c).upper() or 'UNIDADE' in str(c).upper()), df_bruto.columns[0])
+            
+            col_valor = None
+            for c in df_bruto.columns:
+                c_upper = str(c).upper()
+                if any(palavra in c_upper for palavra in ['PERMANÊNCIA', 'PERMANENCIA', 'PACIENTE', 'DIA', 'MÉDIA']):
+                    col_valor = c
+                    break
+                elif any(palavra in c_upper for palavra in ['REALIZADO', 'ATENDIMENTO', 'ATENDIDOS']):
+                    col_valor = c
+                    break
+                    
+            if not col_valor:
+                col_valor = df_bruto.columns[-1]
 
-        # 3. Limpeza
-        df_limpo = pd.DataFrame({
-            'Setor PEP': df_bruto[col_setor].astype(str).str.strip().str.upper(),
-            'Quantidade': pd.to_numeric(df_bruto[col_valor], errors='coerce')
-        }).dropna(subset=['Setor PEP', 'Quantidade'])
+            origem = 'INTERNADOS' if 'internados' in filename else 'ATENDIDOS'
 
-        # 4. Cruzamento Poka-Yoke
-        setores_planilha = df_limpo['Setor PEP'].unique()
+            df_parcial = pd.DataFrame({
+                'Setor PEP': df_bruto[col_setor].astype(str).str.strip().str.upper(),
+                'Quantidade': pd.to_numeric(df_bruto[col_valor], errors='coerce'),
+                'Origem': origem
+            }).dropna(subset=['Setor PEP', 'Quantidade'])
+            
+            dfs_limpos.append(df_parcial)
+
+        df_limpo_total = pd.concat(dfs_limpos, ignore_index=True)
+
+        setores_planilha = df_limpo_total['Setor PEP'].unique()
         setores_banco = df_depara['nome_setor_pep'].unique()
         orfaos = [s for s in setores_planilha if s not in setores_banco and s not in ['TOTAIS', 'NAN', 'TOTAL', '']]
 
-        df_cruzado = pd.merge(df_limpo, df_depara, left_on='Setor PEP', right_on='nome_setor_pep', how='inner')
-        df_final = df_cruzado.groupby(['nome_cc_oficial', 'item_producao'], as_index=False)['Quantidade'].sum()
+        # 2. Cruzamento Inicial
+        df_cruzado = pd.merge(df_limpo_total, df_depara, left_on='Setor PEP', right_on='nome_setor_pep', how='inner')
+        
+        # 3. 🚨 FILTRO POKA-YOKE (Bloqueio de Soma Falsa) 🚨
+        mask_internados = (df_cruzado['Origem'] == 'INTERNADOS') & (df_cruzado['item_producao'].str.contains('dia', case=False, na=False))
+        mask_atendidos = (df_cruzado['Origem'] == 'ATENDIDOS') & (~df_cruzado['item_producao'].str.contains('dia', case=False, na=False))
+        
+        df_cruzado_filtrado = df_cruzado[mask_internados | mask_atendidos]
+
+        # 4. Agrupamento Seguro
+        df_final = df_cruzado_filtrado.groupby(['nome_cc_oficial', 'item_producao'], as_index=False)['Quantidade'].sum()
 
         resultados = df_final.rename(
             columns={'nome_cc_oficial': 'cc_pngc', 'Quantidade': 'quantidade'}
@@ -99,4 +111,4 @@ async def processar_pep(file: UploadFile = File(...)):
         return {"sucesso": True, "orfaos": orfaos, "resultados": resultados}
 
     except Exception as e:
-        return {"sucesso": False, "erro": f"Erro interno no processamento: {str(e)}"}
+        return {"sucesso": False, "erro": f"Erro interno: {str(e)}"}
