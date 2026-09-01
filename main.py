@@ -15,6 +15,7 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+# Coloque as suas chaves do Supabase aqui novamente
 SUPABASE_URL = "https://eacnghcsrajvluiuoqvm.supabase.co"
 SUPABASE_KEY = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImVhY25naGNzcmFqdmx1aXVvcXZtIiwicm9sZSI6ImFub24iLCJpYXQiOjE3ODYwMTQxNDQsImV4cCI6MjEwMTU5MDE0NH0.U6lM5gB9um6VRuDDP04hvc74aSOB1_aIG0Nn4onomM8"
 supabase: Client = create_client(SUPABASE_URL, SUPABASE_KEY)
@@ -46,11 +47,9 @@ async def processar_pep(files: List[UploadFile] = File(...)):
 
         dfs_limpos = []
 
-        # 1. Leitura com Tag de Origem
+        # 1. Leitura Inteligente (Ignorando o nome do arquivo enviado)
         for file in files:
             conteudo = await file.read()
-            filename = str(file.filename).lower()
-            
             df_temp = pd.read_excel(io.BytesIO(conteudo), header=None)
             
             header_idx = 4
@@ -63,20 +62,16 @@ async def processar_pep(files: List[UploadFile] = File(...)):
             df_bruto = pd.read_excel(io.BytesIO(conteudo), skiprows=header_idx)
             col_setor = next((c for c in df_bruto.columns if 'SETOR' in str(c).upper() or 'UNIDADE' in str(c).upper()), df_bruto.columns[0])
             
-            col_valor = None
-            for c in df_bruto.columns:
-                c_upper = str(c).upper()
-                if any(palavra in c_upper for palavra in ['PERMANÊNCIA', 'PERMANENCIA', 'PACIENTE', 'DIA', 'MÉDIA']):
-                    col_valor = c
-                    break
-                elif any(palavra in c_upper for palavra in ['REALIZADO', 'ATENDIMENTO', 'ATENDIDOS']):
-                    col_valor = c
-                    break
-                    
-            if not col_valor:
-                col_valor = df_bruto.columns[-1]
-
-            origem = 'INTERNADOS' if 'internados' in filename else 'ATENDIDOS'
+            # BLINDAGEM: Lê as colunas para descobrir se é Internados ou Atendidos
+            colunas_str = ' '.join(str(c).upper() for c in df_bruto.columns)
+            
+            if 'PERMANÊNCIA' in colunas_str or 'DIA' in colunas_str:
+                origem = 'INTERNADOS'
+                col_valor = next((c for c in df_bruto.columns if 'PERMANÊNCIA' in str(c).upper() or 'DIA' in str(c).upper()), df_bruto.columns[-1])
+            else:
+                origem = 'ATENDIDOS'
+                # Força a busca por "Realizado" para evitar pegar "Pacientes atendidos"
+                col_valor = next((c for c in df_bruto.columns if 'REALIZADO' in str(c).upper()), df_bruto.columns[-1])
 
             df_parcial = pd.DataFrame({
                 'Setor PEP': df_bruto[col_setor].astype(str).str.strip().str.upper(),
