@@ -1,6 +1,4 @@
 fastapi
 uvicorn
-pandas
-openpyxl
 supabase
 python-multipart
