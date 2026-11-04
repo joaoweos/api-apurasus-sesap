@@ -15,7 +15,11 @@ from fastapi import Depends, FastAPI, File, Form, Header, HTTPException, UploadF
 from fastapi.encoders import jsonable_encoder
 from fastapi.middleware.cors import CORSMiddleware
 
+from pydantic import BaseModel
+
 from importador import ArquivoInvalido, ler_relatorio
+from importador.gravar import importar
+from importador.repositorios import RepositorioSupabase
 
 app = FastAPI(title="API Consolidador SESAP - ApuraSUS")
 
@@ -42,6 +46,11 @@ def get_supabase():
 
         _supabase = create_client(os.environ["SUPABASE_URL"], os.environ["SUPABASE_SERVICE_KEY"])
     return _supabase
+
+
+def get_repo():
+    """Repositório de dados (trocado por um banco em memória nos testes)."""
+    return RepositorioSupabase(get_supabase())
 
 
 def exigir_chave(x_api_key: Optional[str] = Header(default=None)):
@@ -89,3 +98,59 @@ async def ler_relatorio_apurasus(
             "amostra": leitura.linhas[:5],
         }
     )
+
+
+# ---------------------------------------------------------------------------
+# Importação (grava no Supabase) e apoio às pendências
+# ---------------------------------------------------------------------------
+@app.post("/importar", dependencies=[Depends(exigir_chave)])
+async def importar_relatorio(
+    arquivo: UploadFile = File(...),
+    unidade_id: str = Form(...),
+    tipo: Optional[str] = Form(default=None),
+    usuario: Optional[str] = Form(default=None),
+    reprocessar: bool = Form(default=False),
+    repo=Depends(get_repo),
+):
+    """Lê, confere e grava um relatório do ApuraSUS na unidade informada.
+
+    Se houver nomes sem correspondência, nada é gravado: o retorno traz `pendencias`
+    (com sugestões). Depois de resolvê-las, reenvie o mesmo arquivo.
+    """
+    conteudo = await arquivo.read()
+    if len(conteudo) > TAMANHO_MAXIMO:
+        raise HTTPException(status_code=413, detail="Arquivo maior que 10 MB.")
+    r = importar(repo, unidade_id, conteudo, arquivo.filename or "relatorio.csv", tipo or None, usuario, reprocessar)
+    return jsonable_encoder(r)
+
+
+@app.get("/dimensoes", dependencies=[Depends(exigir_chave)])
+def listar_dimensoes(repo=Depends(get_repo)):
+    """Centros e itens padrão, para o app montar as listas de escolha das pendências."""
+    return repo.listar_dimensoes()
+
+
+class DeParaCentro(BaseModel):
+    unidade_id: str
+    nome_no_apurasus: str
+    cc_pngc_id: str
+    tipo_secao: Optional[str] = None   # administrativo | intermediario | final | externo
+    ocorrencia: int = 1
+
+
+@app.post("/de-para/centro", dependencies=[Depends(exigir_chave)])
+def salvar_de_para_centro(corpo: DeParaCentro, repo=Depends(get_repo)):
+    repo.salvar_depara_centro(corpo.model_dump())
+    return {"sucesso": True}
+
+
+class AliasItem(BaseModel):
+    nome: str
+    ic_id: str
+    usuario: Optional[str] = None
+
+
+@app.post("/alias/item", dependencies=[Depends(exigir_chave)])
+def salvar_alias_item(corpo: AliasItem, repo=Depends(get_repo)):
+    repo.salvar_alias_item(corpo.nome, corpo.ic_id, corpo.usuario)
+    return {"sucesso": True}

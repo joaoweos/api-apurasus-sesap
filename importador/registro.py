@@ -29,7 +29,7 @@ def detectar_tipo(conteudo: bytes) -> str | None:
 
 def ler_relatorio(conteudo: bytes, tipo: str | None = None) -> Leitura:
     detectado = detectar_tipo(conteudo)
-    if tipo is None:
+    if not tipo:            # None ou texto vazio (formulários costumam enviar vazio)
         tipo = detectado
     if tipo not in _LEITORES:
         if tipo == "formacao_custo_centro":
