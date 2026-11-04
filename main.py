@@ -9,6 +9,7 @@ Configuração por variáveis de ambiente (Render > Environment):
 """
 import os
 import secrets
+import logging
 from typing import Optional
 
 from fastapi import Depends, FastAPI, File, Form, Header, HTTPException, UploadFile
@@ -120,7 +121,11 @@ async def importar_relatorio(
     conteudo = await arquivo.read()
     if len(conteudo) > TAMANHO_MAXIMO:
         raise HTTPException(status_code=413, detail="Arquivo maior que 10 MB.")
-    r = importar(repo, unidade_id, conteudo, arquivo.filename or "relatorio.csv", tipo or None, usuario, reprocessar)
+    try:
+        r = importar(repo, unidade_id, conteudo, arquivo.filename or "relatorio.csv", tipo or None, usuario, reprocessar)
+    except Exception as e:  # falha inesperada (ex.: o banco recusou algum dado)
+        logging.exception("Falha em /importar")
+        raise HTTPException(status_code=500, detail=f"Erro ao importar: {type(e).__name__}: {e}")
     return jsonable_encoder(r)
 
 
