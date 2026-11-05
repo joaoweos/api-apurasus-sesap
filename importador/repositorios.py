@@ -25,8 +25,9 @@ def _linha_json(linha: dict) -> dict:
 class RepositorioMemoria:
     """Banco falso, só para testes."""
 
-    def __init__(self, unidades, centros, itens, alias_itens=(), depara_centros=()):
+    def __init__(self, unidades, centros, itens, alias_itens=(), depara_centros=(), usuarios=()):
         self.unidades = {u["id"]: u for u in unidades}
+        self.usuarios = {u["email"]: u for u in usuarios}
         self.centros, self.itens = list(centros), list(itens)
         self.alias_itens, self.depara_centros = list(alias_itens), list(depara_centros)
         self.importacoes: dict[str, dict] = {}
@@ -36,6 +37,13 @@ class RepositorioMemoria:
 
     def obter_unidade(self, unidade_id):
         return self.unidades.get(unidade_id)
+
+    def obter_usuario(self, email):
+        return self.usuarios.get(email)
+
+    def listar_importacoes(self, unidade_id, limite=20):
+        itens = [i for i in self.importacoes.values() if i["unidade_id"] == unidade_id]
+        return itens[-limite:][::-1]
 
     def carregar_dimensoes(self, unidade_id):
         dep = [d for d in self.depara_centros if d["unidade_id"] == unidade_id]
@@ -106,6 +114,15 @@ class RepositorioSupabase:
     def obter_unidade(self, unidade_id):
         dados = self.sb.table("unidades").select("id,nome,nome_no_apurasus").eq("id", unidade_id).limit(1).execute().data
         return dados[0] if dados else None
+
+    def obter_usuario(self, email):
+        d = self.sb.table("usuarios_unidade").select("email,nome,unidade_id,papel,ativo").eq("email", email).limit(1).execute().data
+        return d[0] if d else None
+
+    def listar_importacoes(self, unidade_id, limite=20):
+        return (self.sb.table("importacoes")
+                .select("id,tipo_relatorio,competencia_inicio,competencia_fim,arquivo_nome,status,linhas_gravadas,linhas_pendentes,mensagem,criado_por,created_at")
+                .eq("unidade_id", unidade_id).order("created_at", desc=True).limit(limite).execute().data)
 
     def carregar_dimensoes(self, unidade_id):
         return Dimensoes(

@@ -8,13 +8,17 @@
 | `API_KEY` | senha que o app (Base44/Make) envia no cabeçalho `X-API-Key` |
 | `CORS_ORIGINS` | endereços do app, separados por vírgula (vazio = qualquer origem) |
 
-## Endpoints
+## Endpoints (todos exigem o cabeçalho `X-API-Key`; os de dados exigem também `usuario_email`)
 - `GET /` — verifica se está no ar.
-- `POST /ler-relatorio` — lê um CSV bruto do ApuraSUS e devolve a prévia (tipo, instituição, período, meses, linhas, erros de conferência, avisos). **Ainda não grava no banco.**
-  Campo `arquivo` (obrigatório) e `tipo` (opcional): `custo_total_unidade`, `matriz_item_centro`, `centro_produto`.
-- `POST /importar` — lê, confere e **grava** o relatório na unidade (`unidade_id`). Com nomes sem correspondência, nada é gravado e a resposta traz as `pendencias` com sugestões; depois de resolvê-las, reenvie o mesmo arquivo.
-- `GET /dimensoes` — centros e itens padrão (para as listas de escolha das pendências).
-- `POST /de-para/centro` e `POST /alias/item` — salvam a resolução de uma pendência.
+- `GET /eu` — perfil do usuário e a unidade dele.
+- `GET /dimensoes` — centros e itens padrão (listas de escolha das pendências).
+- `GET /importacoes` — histórico das últimas importações da unidade.
+- `POST /ler-relatorio` — prévia de um CSV do ApuraSUS, sem gravar.
+- `POST /importar` — lê, confere e **grava** o relatório. O gestor sempre importa na própria unidade; só o master informa `unidade_id`. Com nomes sem correspondência nada é gravado e a resposta traz `pendencias`.
+- `POST /de-para/centro` — resolve uma pendência de centro (na unidade do usuário).
+- `POST /alias/item` — resolve uma pendência de item (vale para todas as unidades: só o master).
+
+Perfis (tabela `usuarios_unidade`): `master_sesap`, `gestor_unidade`, `leitura_unidade`.
 
 ## Estrutura
 - `importador/comum.py` — codificação, separador, números, datas, nomes.
@@ -22,6 +26,7 @@
 - `importador/registro.py` — detecta o tipo pelo cabeçalho e escolhe o leitor.
 - `importador/resolver.py` — casa nomes com as dimensões e o de-para da unidade.
 - `importador/gravar.py` — fluxo de importação (conferir, resolver, gravar, registrar).
+- `importador/acesso.py` — regras de permissão por perfil.
 - `importador/repositorios.py` — acesso a dados (Supabase e uma versão em memória para testes).
 
 ## Testes
