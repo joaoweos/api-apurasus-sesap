@@ -41,6 +41,9 @@ class RepositorioMemoria:
     def obter_usuario(self, email):
         return self.usuarios.get(email)
 
+    def listar_unidades(self):
+        return [{"id": u["id"], "nome": u["nome"]} for u in self.unidades.values()]
+
     def listar_importacoes(self, unidade_id, limite=20):
         itens = [i for i in self.importacoes.values() if i["unidade_id"] == unidade_id]
         return itens[-limite:][::-1]
@@ -114,6 +117,9 @@ class RepositorioSupabase:
     def obter_unidade(self, unidade_id):
         dados = self.sb.table("unidades").select("id,nome,nome_no_apurasus").eq("id", unidade_id).limit(1).execute().data
         return dados[0] if dados else None
+
+    def listar_unidades(self):
+        return self.sb.table("unidades").select("id,nome").eq("ativa", True).order("nome").execute().data
 
     def obter_usuario(self, email):
         d = self.sb.table("usuarios_unidade").select("email,nome,unidade_id,papel,ativo").eq("email", email).limit(1).execute().data

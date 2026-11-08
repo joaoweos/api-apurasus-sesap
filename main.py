@@ -85,6 +85,19 @@ def quem_sou_eu(usuario_email: str = Query(...), repo=Depends(get_repo)):
             "unidade": ({"id": unidade["id"], "nome": unidade["nome"]} if unidade else None)}
 
 
+@app.get("/unidades", dependencies=[Depends(exigir_chave)])
+def listar_unidades(usuario_email: str = Query(...), repo=Depends(get_repo)):
+    """Unidades que o usuário pode escolher: todas para o master, só a própria para os demais."""
+    try:
+        u = usuario_ativo(repo, usuario_email)
+    except AcessoNegado as e:
+        _negar(e)
+    if u["papel"] == "master_sesap":
+        return repo.listar_unidades()
+    un = repo.obter_unidade(u["unidade_id"])
+    return [{"id": un["id"], "nome": un["nome"]}] if un else []
+
+
 @app.get("/dimensoes", dependencies=[Depends(exigir_chave)])
 def listar_dimensoes(usuario_email: str = Query(...), repo=Depends(get_repo)):
     """Centros e itens padrão, para as listas de escolha das pendências."""

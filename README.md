@@ -11,6 +11,7 @@
 ## Endpoints (todos exigem o cabeçalho `X-API-Key`; os de dados exigem também `usuario_email`)
 - `GET /` — verifica se está no ar.
 - `GET /eu` — perfil do usuário e a unidade dele.
+- `GET /unidades` — unidades que o usuário pode escolher (todas para o master).
 - `GET /dimensoes` — centros e itens padrão (listas de escolha das pendências).
 - `GET /importacoes` — histórico das últimas importações da unidade.
 - `POST /ler-relatorio` — prévia de um CSV do ApuraSUS, sem gravar.
