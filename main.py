@@ -11,11 +11,13 @@ Variáveis de ambiente (Render > Environment):
 import logging
 import os
 import secrets
+import uuid
 from typing import Optional
 
 from fastapi import Depends, FastAPI, File, Form, Header, HTTPException, Query, UploadFile
 from fastapi.encoders import jsonable_encoder
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import JSONResponse
 from pydantic import BaseModel
 
 from importador import ArquivoInvalido, ler_relatorio
@@ -59,6 +61,20 @@ def exigir_chave(x_api_key: Optional[str] = Header(default=None)):
         raise HTTPException(status_code=500, detail="API_KEY não configurada no servidor.")
     if not x_api_key or not secrets.compare_digest(x_api_key, esperada):
         raise HTTPException(status_code=401, detail="Chave de acesso inválida.")
+
+
+@app.exception_handler(Exception)
+async def erro_inesperado(request, exc):
+    """Qualquer falha não prevista vira JSON com o motivo (em vez de 'Internal Server Error' sem explicação)."""
+    logging.exception("Erro inesperado em %s", request.url.path)
+    return JSONResponse(status_code=500, content={"detail": f"Erro interno: {type(exc).__name__}: {exc}"})
+
+
+def _exigir_uuid(valor: str, campo: str):
+    try:
+        uuid.UUID(str(valor))
+    except ValueError:
+        raise HTTPException(status_code=422, detail=f"{campo} inválido: não é um identificador (uuid).")
 
 
 def _negar(e: AcessoNegado):
@@ -191,6 +207,9 @@ def salvar_de_para_centro(corpo: DeParaCentro, repo=Depends(get_repo)):
         uid = unidade_permitida(u, corpo.unidade_id, escrita=True)
     except AcessoNegado as e:
         _negar(e)
+    _exigir_uuid(corpo.cc_pngc_id, "cc_pngc_id")
+    if not repo.centro_existe(corpo.cc_pngc_id):
+        raise HTTPException(status_code=422, detail="Centro padrão não encontrado: confira se o id é de um centro (e não de um item).")
     repo.salvar_depara_centro({"unidade_id": uid, "nome_no_apurasus": corpo.nome_no_apurasus,
                                "cc_pngc_id": corpo.cc_pngc_id, "tipo_secao": (corpo.tipo_secao or None),
                                "ocorrencia": (corpo.ocorrencia or 1)})
@@ -211,5 +230,8 @@ def salvar_alias_item(corpo: AliasItem, repo=Depends(get_repo)):
         exigir_master(u)
     except AcessoNegado as e:
         _negar(e)
+    _exigir_uuid(corpo.ic_id, "ic_id")
+    if not repo.item_existe(corpo.ic_id):
+        raise HTTPException(status_code=422, detail="Item padrão não encontrado: confira se o id é de um item (e não de um centro).")
     repo.salvar_alias_item(corpo.nome, corpo.ic_id, u["email"])
     return {"sucesso": True}

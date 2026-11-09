@@ -44,6 +44,12 @@ class RepositorioMemoria:
     def listar_unidades(self):
         return [{"id": u["id"], "nome": u["nome"]} for u in self.unidades.values()]
 
+    def centro_existe(self, cc_id):
+        return any(c["id"] == cc_id for c in self.centros)
+
+    def item_existe(self, ic_id):
+        return any(i["id"] == ic_id for i in self.itens)
+
     def listar_importacoes(self, unidade_id, limite=20):
         itens = [i for i in self.importacoes.values() if i["unidade_id"] == unidade_id]
         return itens[-limite:][::-1]
@@ -117,6 +123,12 @@ class RepositorioSupabase:
     def obter_unidade(self, unidade_id):
         dados = self.sb.table("unidades").select("id,nome,nome_no_apurasus").eq("id", unidade_id).limit(1).execute().data
         return dados[0] if dados else None
+
+    def centro_existe(self, cc_id):
+        return bool(self.sb.table("dim_cc_pngc").select("id").eq("id", cc_id).limit(1).execute().data)
+
+    def item_existe(self, ic_id):
+        return bool(self.sb.table("dim_ic_pngc").select("id").eq("id", ic_id).limit(1).execute().data)
 
     def listar_unidades(self):
         return self.sb.table("unidades").select("id,nome").eq("ativa", True).order("nome").execute().data
