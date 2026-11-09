@@ -180,8 +180,8 @@ class DeParaCentro(BaseModel):
     nome_no_apurasus: str
     cc_pngc_id: str
     unidade_id: Optional[str] = None   # só vale para o master
-    tipo_secao: Optional[str] = None   # administrativo | intermediario | final | externo
-    ocorrencia: int = 1
+    tipo_secao: Optional[str] = None   # administrativo | intermediario | final | externo ('' vale como vazio)
+    ocorrencia: Optional[int] = 1
 
 
 @app.post("/de-para/centro", dependencies=[Depends(exigir_chave)])
@@ -192,8 +192,8 @@ def salvar_de_para_centro(corpo: DeParaCentro, repo=Depends(get_repo)):
     except AcessoNegado as e:
         _negar(e)
     repo.salvar_depara_centro({"unidade_id": uid, "nome_no_apurasus": corpo.nome_no_apurasus,
-                               "cc_pngc_id": corpo.cc_pngc_id, "tipo_secao": corpo.tipo_secao,
-                               "ocorrencia": corpo.ocorrencia})
+                               "cc_pngc_id": corpo.cc_pngc_id, "tipo_secao": (corpo.tipo_secao or None),
+                               "ocorrencia": (corpo.ocorrencia or 1)})
     return {"sucesso": True}
 
 
