@@ -12,6 +12,7 @@ import logging
 import os
 import secrets
 import uuid
+from urllib.parse import urljoin, urlparse
 from typing import Optional
 
 from fastapi import Depends, FastAPI, File, Form, Header, HTTPException, Query, UploadFile
@@ -37,6 +38,8 @@ app.add_middleware(
 )
 
 TAMANHO_MAXIMO = 10 * 1024 * 1024  # 10 MB
+# Só baixamos arquivos de endereços https destes hosts (evita que o servidor seja usado para acessar outros sites).
+HOSTS_PERMITIDOS = {h.strip().lower() for h in os.environ.get("ARQUIVO_HOSTS_PERMITIDOS", "media.base44.com").split(",") if h.strip()}
 _supabase = None
 
 
@@ -68,6 +71,31 @@ async def erro_inesperado(request, exc):
     """Qualquer falha não prevista vira JSON com o motivo (em vez de 'Internal Server Error' sem explicação)."""
     logging.exception("Erro inesperado em %s", request.url.path)
     return JSONResponse(status_code=500, content={"detail": f"Erro interno: {type(exc).__name__}: {exc}"})
+
+
+def baixar_arquivo(url: str) -> bytes:
+    """Baixa o arquivo enviado pelo app, byte a byte (sem decodificar), só de hosts permitidos."""
+    import httpx
+
+    atual = url
+    for _ in range(4):
+        p = urlparse(atual)
+        host = (p.hostname or "").lower()
+        if p.scheme != "https" or host not in HOSTS_PERMITIDOS:
+            raise HTTPException(status_code=422, detail=f"Endereço do arquivo não permitido (host: {host or 'inválido'}).")
+        with httpx.stream("GET", atual, timeout=30.0, follow_redirects=False) as r:
+            if r.status_code in (301, 302, 303, 307, 308):
+                atual = urljoin(atual, r.headers.get("location", ""))
+                continue
+            if r.status_code != 200:
+                raise HTTPException(status_code=422, detail=f"Não foi possível baixar o arquivo (status {r.status_code}).")
+            dados = bytearray()
+            for pedaco in r.iter_bytes():
+                dados += pedaco
+                if len(dados) > TAMANHO_MAXIMO:
+                    raise HTTPException(status_code=413, detail="Arquivo maior que 10 MB.")
+            return bytes(dados)
+    raise HTTPException(status_code=422, detail="Redirecionamentos demais ao baixar o arquivo.")
 
 
 def _exigir_uuid(valor: str, campo: str):
@@ -160,8 +188,10 @@ async def ler_relatorio_apurasus(arquivo: UploadFile = File(...), tipo: Optional
 
 @app.post("/importar", dependencies=[Depends(exigir_chave)])
 async def importar_relatorio(
-    arquivo: UploadFile = File(...),
     usuario_email: str = Form(...),
+    arquivo: Optional[UploadFile] = File(default=None),        # envio direto (testes no /docs)
+    arquivo_url: Optional[str] = Form(default=None),           # envio pelo app: o Render baixa o arquivo
+    arquivo_nome: Optional[str] = Form(default=None),
     unidade_id: Optional[str] = Form(default=None),   # só vale para o master; o gestor usa a unidade do cadastro
     tipo: Optional[str] = Form(default=None),
     reprocessar: bool = Form(default=False),
@@ -177,11 +207,16 @@ async def importar_relatorio(
         uid = unidade_permitida(u, unidade_id, escrita=True)
     except AcessoNegado as e:
         _negar(e)
-    conteudo = await arquivo.read()
+    if bool(arquivo) == bool(arquivo_url):
+        raise HTTPException(status_code=422, detail="Envie o arquivo OU o arquivo_url (um dos dois).")
+    if arquivo_url:
+        conteudo, nome = baixar_arquivo(arquivo_url), (arquivo_nome or "relatorio.csv")
+    else:
+        conteudo, nome = await arquivo.read(), (arquivo_nome or arquivo.filename or "relatorio.csv")
     if len(conteudo) > TAMANHO_MAXIMO:
         raise HTTPException(status_code=413, detail="Arquivo maior que 10 MB.")
     try:
-        r = importar(repo, uid, conteudo, arquivo.filename or "relatorio.csv", tipo or None, u["email"], reprocessar)
+        r = importar(repo, uid, conteudo, nome, tipo or None, u["email"], reprocessar)
     except Exception as e:  # falha inesperada (ex.: o banco recusou algum dado)
         logging.exception("Falha em /importar")
         raise HTTPException(status_code=500, detail=f"Erro ao importar: {type(e).__name__}: {e}")

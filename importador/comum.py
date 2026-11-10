@@ -126,8 +126,8 @@ def achar_instituicao(linhas: list[list[str]]) -> str:
         if not c0:
             continue
         baixo = normalizar(c0)
-        if baixo.startswith("instituicao:"):
-            return c0.split(":", 1)[1].strip()
+        if baixo.startswith("instituicao:") or re.match(r"^\s*institui.{0,3}o\s*:", c0, re.I):
+            return c0.split(":", 1)[1].strip()          # tolera 'Institui��o:' (acentos corrompidos)
         if not re.search(r"\d{2}/\d{2}/\d{4}|periodo", baixo):
             return c0
     raise ArquivoInvalido("Não foi possível identificar a instituição no cabeçalho.")

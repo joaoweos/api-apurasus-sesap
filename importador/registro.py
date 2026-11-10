@@ -39,4 +39,7 @@ def ler_relatorio(conteudo: bytes, tipo: str | None = None) -> Leitura:
                               + ", ".join(TIPOS_SUPORTADOS) + ".")
     if detectado and detectado != tipo:
         raise ArquivoInvalido(f"O arquivo parece ser do tipo '{detectado}', mas foi enviado como '{tipo}'.")
+    if tipo != custo_total_unidade.TIPO and "\ufffd" in decodificar(conteudo):
+        raise ArquivoInvalido("O arquivo chegou com os acentos corrompidos (caracteres '\ufffd'). Isso acontece quando ele é aberto e "
+                              "salvo em planilha ou alterado no caminho. Envie o arquivo exatamente como baixado do ApuraSUS.")
     return _LEITORES[tipo](conteudo)
