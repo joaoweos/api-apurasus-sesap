@@ -288,6 +288,9 @@ VISOES = {
     "completude":     ("v_completude_mes", ["competencia"]),
     "sem-lancamento": ("v_item_sem_lancamento", ["competencia", "item"]),
     "conciliacao":    ("v_conciliacao_mes", ["competencia"]),
+    "qualidade":      ("v_qualidade_mes", ["competencia"]),
+    "centros-mensal": ("v_centro_mensal", ["competencia", "tipo", "centro"]),
+    "tipos-centro":   ("v_tipo_centro_mensal", ["competencia", "tipo"]),
 }
 VISOES_MASTER = {"comparativo": ("v_comparativo_unidades", ["competencia", "centro"])}
 _DATA = re.compile(r"^\d{4}-\d{2}-01$")
@@ -330,6 +333,7 @@ class MesStatus(BaseModel):
     status: str                 # fechado | parcial
     unidade_id: Optional[str] = None
     observacao: Optional[str] = None
+    forcar: bool = False        # só o master pode fechar um mês com relatórios obrigatórios faltando
 
 
 @app.post("/painel/mes-status", dependencies=[Depends(exigir_chave)])
@@ -343,5 +347,18 @@ def definir_mes_status(corpo: MesStatus, repo=Depends(get_repo)):
         uid = unidade_permitida(u, corpo.unidade_id, escrita=True)
     except AcessoNegado as e:
         _negar(e)
+    if corpo.status == "fechado":
+        linhas = repo.consultar_view("v_qualidade_mes", uid, "*", corpo.competencia, None, None, None)
+        q = linhas[0] if linhas else None
+        if q is None or not q.get("pode_fechar"):
+            if corpo.forcar and u["papel"] == "master_sesap":
+                pass
+            else:
+                falta = (q or {}).get("faltando_obrigatorios") or []
+                motivo = ("faltam os relatórios: " + ", ".join(falta)) if falta else (
+                    "a conciliação não está OK" if q else "não há dados nesse mês")
+                raise HTTPException(status_code=409, detail=(
+                    f"Este mês ainda não pode ser fechado: {motivo}. "
+                    "Só o master da SESAP pode fechar mesmo assim."))
     repo.definir_mes_status(uid, corpo.competencia, corpo.status, corpo.observacao, u["email"])
     return {"sucesso": True}
