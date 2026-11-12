@@ -34,6 +34,7 @@ class RepositorioMemoria:
         self.pendencias: dict[str, list] = {}
         self.tabelas: dict[str, dict] = {}
         self.mes_status: dict[tuple, str] = {}
+        self.views: dict[str, list] = {}   # dados falsos de views, para os testes
 
     def obter_unidade(self, unidade_id):
         return self.unidades.get(unidade_id)
@@ -87,6 +88,16 @@ class RepositorioMemoria:
     def garantir_mes_status(self, unidade_id, competencias):
         for c in competencias:
             self.mes_status.setdefault((unidade_id, c), "parcial")
+
+    def consultar_view(self, view, unidade_id=None, colunas="*", competencia=None, de=None, ate=None, ordem=None):
+        r = [l for l in self.views.get(view, []) if unidade_id is None or l.get("unidade_id") == unidade_id]
+        if competencia: r = [l for l in r if str(l.get("competencia")) == competencia]
+        if de: r = [l for l in r if str(l.get("competencia")) >= de]
+        if ate: r = [l for l in r if str(l.get("competencia")) <= ate]
+        return r
+
+    def definir_mes_status(self, unidade_id, competencia, status, observacao, usuario):
+        self.mes_status[(unidade_id, competencia)] = status
 
     def linhas(self, tabela):
         return list(self.tabelas.get(tabela, {}).values())
@@ -194,6 +205,28 @@ class RepositorioSupabase:
     def salvar_alias_item(self, nome, ic_id, usuario=None):
         self.sb.table("dim_ic_alias").upsert(
             {"nome_normalizado": normalizar(nome), "ic_id": ic_id, "criado_por": usuario}, on_conflict="nome_normalizado").execute()
+
+    def consultar_view(self, view, unidade_id=None, colunas="*", competencia=None, de=None, ate=None, ordem=None):
+        """Lê uma view já calculada no Supabase (os cálculos ficam lá, não no app)."""
+        q = self.sb.table(view).select(colunas)
+        if unidade_id:
+            q = q.eq("unidade_id", unidade_id)
+        if competencia:
+            q = q.eq("competencia", competencia)
+        if de:
+            q = q.gte("competencia", de)
+        if ate:
+            q = q.lte("competencia", ate)
+        for campo in (ordem or []):
+            q = q.order(campo)
+        return q.limit(5000).execute().data
+
+    def definir_mes_status(self, unidade_id, competencia, status, observacao, usuario):
+        self.sb.table("mes_status").upsert(
+            {"unidade_id": unidade_id, "competencia": competencia, "status": status,
+             "observacao": observacao, "atualizado_por": usuario,
+             "updated_at": datetime.now(timezone.utc).isoformat()},
+            on_conflict="unidade_id,competencia").execute()
 
     def listar_dimensoes(self):
         return {"centros": self._todas("dim_cc_pngc", "id,codigo,nome,tipo,item_producao_padrao"),

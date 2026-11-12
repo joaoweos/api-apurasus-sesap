@@ -35,3 +35,10 @@ Os testes usam arquivos reais do ApuraSUS, que não ficam no repositório:
 
     pip install -r requirements-dev.txt
     AMOSTRAS_DIR=/pasta/com/os/csv pytest -q
+
+
+## Painel (v6)
+- `GET /painel/{visao}?usuario_email=...&unidade_id=...&competencia=AAAA-MM-01&de=...&ate=...`
+  visões: `total-mensal`, `grupos`, `itens`, `centros`, `unitario`, `completude`, `sem-lancamento`, `conciliacao`;
+  `comparativo` (todas as unidades) só para o master. Master precisa informar `unidade_id`; os demais usam a própria unidade.
+- `POST /painel/mes-status` (JSON: usuario_email, competencia, status `fechado|parcial`, unidade_id, observacao) — leitura não pode.

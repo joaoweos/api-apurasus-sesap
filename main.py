@@ -11,6 +11,7 @@ Variáveis de ambiente (Render > Environment):
 import logging
 import os
 import secrets
+import re
 import uuid
 from urllib.parse import urljoin, urlparse
 from typing import Optional
@@ -269,4 +270,76 @@ def salvar_alias_item(corpo: AliasItem, repo=Depends(get_repo)):
     if not repo.item_existe(corpo.ic_id):
         raise HTTPException(status_code=422, detail="Item padrão não encontrado: confira se o id é de um item (e não de um centro).")
     repo.salvar_alias_item(corpo.nome, corpo.ic_id, u["email"])
+    return {"sucesso": True}
+
+
+# ---------------------------------------------------------------------------
+# Painel: leitura das views do Supabase (os cálculos já vêm prontos de lá)
+# ---------------------------------------------------------------------------
+# nome na URL -> (view, colunas ordenadas por)
+VISOES = {
+    "total-mensal":   ("v_total_mensal", ["competencia"]),
+    "grupos":         ("v_grupo_mensal", ["competencia", "grupo"]),
+    "itens":          ("v_item_estatistica", ["competencia", "grupo", "item"]),
+    "centros":        ("v_centro_estatistica", ["competencia", "centro"]),
+    "unitario":       ("v_unitario_estatistica", ["competencia", "centro"]),
+    "completude":     ("v_completude_mes", ["competencia"]),
+    "sem-lancamento": ("v_item_sem_lancamento", ["competencia", "item"]),
+    "conciliacao":    ("v_conciliacao_mes", ["competencia"]),
+}
+VISOES_MASTER = {"comparativo": ("v_comparativo_unidades", ["competencia", "centro"])}
+_DATA = re.compile(r"^\d{4}-\d{2}-01$")
+
+
+def _exigir_data(valor: Optional[str], campo: str):
+    if valor and not _DATA.match(valor):
+        raise HTTPException(status_code=422, detail=f"{campo} deve ser o primeiro dia do mês, no formato AAAA-MM-01.")
+
+
+@app.get("/painel/{visao}", dependencies=[Depends(exigir_chave)])
+def painel(visao: str, usuario_email: str = Query(...), unidade_id: Optional[str] = Query(default=None),
+           competencia: Optional[str] = Query(default=None), de: Optional[str] = Query(default=None),
+           ate: Optional[str] = Query(default=None), repo=Depends(get_repo)):
+    """Dados prontos para as telas. Qualquer perfil lê, mas só a unidade a que tem direito.
+    `comparativo` (todas as unidades) é exclusivo do master."""
+    for v, c in ((competencia, "competencia"), (de, "de"), (ate, "ate")):
+        _exigir_data(v, c)
+    try:
+        u = usuario_ativo(repo, usuario_email)
+        if visao in VISOES_MASTER:
+            exigir_master(u)
+            view, ordem = VISOES_MASTER[visao]
+            uid = str(unidade_id) if unidade_id else None   # opcional: filtra uma unidade
+        elif visao in VISOES:
+            view, ordem = VISOES[visao]
+            uid = unidade_permitida(u, unidade_id, escrita=False)
+        else:
+            raise HTTPException(status_code=404, detail=f"Visão desconhecida: {visao}.")
+    except AcessoNegado as e:
+        _negar(e)
+    if uid:
+        _exigir_uuid(uid, "unidade_id")
+    return jsonable_encoder(repo.consultar_view(view, uid, "*", competencia, de, ate, ordem))
+
+
+class MesStatus(BaseModel):
+    usuario_email: str
+    competencia: str            # AAAA-MM-01
+    status: str                 # fechado | parcial
+    unidade_id: Optional[str] = None
+    observacao: Optional[str] = None
+
+
+@app.post("/painel/mes-status", dependencies=[Depends(exigir_chave)])
+def definir_mes_status(corpo: MesStatus, repo=Depends(get_repo)):
+    """Fecha ou reabre um mês. Só 'fechado' entra no cálculo do custo padrão."""
+    _exigir_data(corpo.competencia, "competencia")
+    if corpo.status not in ("fechado", "parcial"):
+        raise HTTPException(status_code=422, detail="status deve ser 'fechado' ou 'parcial'.")
+    try:
+        u = usuario_ativo(repo, corpo.usuario_email)
+        uid = unidade_permitida(u, corpo.unidade_id, escrita=True)
+    except AcessoNegado as e:
+        _negar(e)
+    repo.definir_mes_status(uid, corpo.competencia, corpo.status, corpo.observacao, u["email"])
     return {"sucesso": True}
