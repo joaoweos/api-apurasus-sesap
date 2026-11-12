@@ -42,3 +42,8 @@ Os testes usam arquivos reais do ApuraSUS, que não ficam no repositório:
   visões: `total-mensal`, `grupos`, `itens`, `centros`, `unitario`, `completude`, `sem-lancamento`, `conciliacao`;
   `comparativo` (todas as unidades) só para o master. Master precisa informar `unidade_id`; os demais usam a própria unidade.
 - `POST /painel/mes-status` (JSON: usuario_email, competencia, status `fechado|parcial`, unidade_id, observacao) — leitura não pode.
+
+## Matriz "Custos Totais" (v7)
+- Tipo `matriz_custos_totais`. O arquivo **não informa hospital nem mês**: o envio precisa trazer `competencia` (AAAA-MM) no `POST /importar` (campo de formulário).
+- Conferências: Direto + Indireto = Total em cada linha; soma do Custo Direto = soma do Custo Total dos centros finais e externo (R$ 1,00); soma do Custo Direto = total dos itens do mês já importado (protege contra mês/unidade errados).
+- Nomes repetidos (ex.: dois "Centro Obstétrico") são separados pela posição em relação ao "Centro de Custos Externo".

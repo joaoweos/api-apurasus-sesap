@@ -169,13 +169,14 @@ def listar_importacoes(usuario_email: str = Query(...), unidade_id: Optional[str
 # Leitura (prévia, sem gravar) e importação
 # ---------------------------------------------------------------------------
 @app.post("/ler-relatorio", dependencies=[Depends(exigir_chave)])
-async def ler_relatorio_apurasus(arquivo: UploadFile = File(...), tipo: Optional[str] = Form(default=None)):
+async def ler_relatorio_apurasus(arquivo: UploadFile = File(...), tipo: Optional[str] = Form(default=None),
+                                 competencia: Optional[str] = Form(default=None)):
     """Lê um CSV bruto e devolve o que foi entendido, sem gravar nada."""
     conteudo = await arquivo.read()
     if len(conteudo) > TAMANHO_MAXIMO:
         raise HTTPException(status_code=413, detail="Arquivo maior que 10 MB.")
     try:
-        leitura = ler_relatorio(conteudo, tipo or None)
+        leitura = ler_relatorio(conteudo, tipo or None, competencia or None)
     except ArquivoInvalido as e:
         raise HTTPException(status_code=422, detail=str(e))
     return jsonable_encoder({
@@ -196,6 +197,7 @@ async def importar_relatorio(
     unidade_id: Optional[str] = Form(default=None),   # só vale para o master; o gestor usa a unidade do cadastro
     tipo: Optional[str] = Form(default=None),
     reprocessar: bool = Form(default=False),
+    competencia: Optional[str] = Form(default=None),   # só para a Matriz Custos Totais (o arquivo não traz o mês): AAAA-MM
     repo=Depends(get_repo),
 ):
     """Lê, confere e grava um relatório na unidade do usuário.
@@ -217,7 +219,7 @@ async def importar_relatorio(
     if len(conteudo) > TAMANHO_MAXIMO:
         raise HTTPException(status_code=413, detail="Arquivo maior que 10 MB.")
     try:
-        r = importar(repo, uid, conteudo, nome, tipo or None, u["email"], reprocessar)
+        r = importar(repo, uid, conteudo, nome, tipo or None, u["email"], reprocessar, competencia or None)
     except Exception as e:  # falha inesperada (ex.: o banco recusou algum dado)
         logging.exception("Falha em /importar")
         raise HTTPException(status_code=500, detail=f"Erro ao importar: {type(e).__name__}: {e}")

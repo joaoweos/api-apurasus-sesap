@@ -89,6 +89,11 @@ class RepositorioMemoria:
         for c in competencias:
             self.mes_status.setdefault((unidade_id, c), "parcial")
 
+    def total_itens_mes(self, unidade_id, competencia):
+        v = [l["valor"] for l in self.tabelas.get("fato_apurasus_custo_item", {}).values()
+             if l["unidade_id"] == unidade_id and l["competencia"] == competencia]
+        return sum(v, Decimal(0)) if v else None
+
     def consultar_view(self, view, unidade_id=None, colunas="*", competencia=None, de=None, ate=None, ordem=None):
         r = [l for l in self.views.get(view, []) if unidade_id is None or l.get("unidade_id") == unidade_id]
         if competencia: r = [l for l in r if str(l.get("competencia")) == competencia]
@@ -205,6 +210,11 @@ class RepositorioSupabase:
     def salvar_alias_item(self, nome, ic_id, usuario=None):
         self.sb.table("dim_ic_alias").upsert(
             {"nome_normalizado": normalizar(nome), "ic_id": ic_id, "criado_por": usuario}, on_conflict="nome_normalizado").execute()
+
+    def total_itens_mes(self, unidade_id, competencia):
+        d = (self.sb.table("fato_apurasus_custo_item").select("valor").eq("unidade_id", unidade_id)
+             .eq("competencia", competencia.isoformat()).limit(5000).execute().data)
+        return sum((Decimal(str(x["valor"])) for x in d), Decimal(0)) if d else None
 
     def consultar_view(self, view, unidade_id=None, colunas="*", competencia=None, de=None, ate=None, ordem=None):
         """Lê uma view já calculada no Supabase (os cálculos ficam lá, não no app)."""

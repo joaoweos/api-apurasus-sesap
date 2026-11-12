@@ -99,6 +99,24 @@ def primeiro_dia(mes: int, ano: int) -> date:
     return date(ano, mes, 1)
 
 
+def parse_competencia(valor) -> date | None:
+    """'2025-11', '2025-11-01' ou '11/2025' -> date(2025, 11, 1). Vazio -> None."""
+    if valor is None or str(valor).strip() == "":
+        return None
+    t = str(valor).strip()
+    m = re.fullmatch(r"(\d{4})-(\d{2})(?:-01)?", t) or None
+    if m:
+        ano, mes = int(m[1]), int(m[2])
+    else:
+        m = re.fullmatch(r"(\d{2})/(\d{4})", t)
+        if not m:
+            raise ArquivoInvalido(f"Mês de referência inválido: {valor!r}. Use AAAA-MM (ex.: 2025-11).")
+        mes, ano = int(m[1]), int(m[2])
+    if not 1 <= mes <= 12:
+        raise ArquivoInvalido(f"Mês de referência inválido: {valor!r}.")
+    return primeiro_dia(mes, ano)
+
+
 def mes_ano_da_celula(celula: str) -> date | None:
     """'01/2025' ou 'Valor(01/2025)' -> date(2025, 1, 1). Datas completas
     ('01/12/2025') não casam."""

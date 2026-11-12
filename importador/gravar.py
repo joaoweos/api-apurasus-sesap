@@ -20,8 +20,10 @@ TABELAS = {
     "custo_total_unidade": ("fato_apurasus_custo_item", "unidade_id,competencia,ic_id"),
     "matriz_item_centro": ("fato_apurasus_item_centro", "unidade_id,competencia,ic_id,cc_id"),
     "centro_produto": ("fato_apurasus_custo_unitario", "unidade_id,competencia,cc_id,item_producao"),
+    "matriz_custos_totais": ("fato_apurasus_formacao_custo", "unidade_id,competencia,cc_id"),
 }
-APAGAR_ANTES = {"matriz_item_centro", "centro_produto"}   # arquivos completos para os meses: substituem o que havia
+APAGAR_ANTES = {"matriz_item_centro", "centro_produto", "matriz_custos_totais"}
+TOLERANCIA_ITENS = Decimal("1.00")   # soma do Custo Direto x total dos itens do mês   # arquivos completos para os meses: substituem o que havia
 
 
 class Repositorio(Protocol):
@@ -34,6 +36,7 @@ class Repositorio(Protocol):
     def apagar(self, tabela: str, unidade_id: str, competencias: list) -> None: ...
     def upsert(self, tabela: str, linhas: list[dict], conflito: str) -> None: ...
     def garantir_mes_status(self, unidade_id: str, competencias: list) -> None: ...
+    def total_itens_mes(self, unidade_id: str, competencia) -> Decimal | None: ...
 
 
 @dataclass
@@ -59,13 +62,14 @@ def _agregar(chaves_valores):
 
 
 def importar(repo: Repositorio, unidade_id: str, conteudo: bytes, nome_arquivo: str,
-             tipo: str | None = None, usuario: str | None = None, reprocessar: bool = False) -> ResultadoImportacao:
+             tipo: str | None = None, usuario: str | None = None, reprocessar: bool = False,
+             competencia: str | None = None) -> ResultadoImportacao:
     unidade = repo.obter_unidade(unidade_id)
     if unidade is None:
         return ResultadoImportacao("erro", "Unidade não encontrada.")
 
     try:
-        leitura = ler_relatorio(conteudo, tipo)
+        leitura = ler_relatorio(conteudo, tipo, competencia)
     except ArquivoInvalido as e:
         return ResultadoImportacao("erro", str(e), erros=[str(e)])
 
@@ -75,10 +79,13 @@ def importar(repo: Repositorio, unidade_id: str, conteudo: bytes, nome_arquivo: 
 
     # 1. O arquivo é do hospital da unidade?
     esperado = unidade.get("nome_no_apurasus")
-    if not esperado:
+    if leitura.extras.get("sem_instituicao_no_arquivo"):
+        # a Matriz Custos Totais não informa o hospital: a conferência com os itens do mês (passo 4b) protege
+        pass
+    elif not esperado:
         msg = "Cadastre na unidade o nome do hospital como aparece nos relatórios do ApuraSUS."
         return ResultadoImportacao("erro", msg, erros=[msg], **base)
-    if nome_hospital(esperado) != nome_hospital(leitura.instituicao):
+    elif nome_hospital(esperado) != nome_hospital(leitura.instituicao):
         msg = (f"O arquivo é de '{leitura.instituicao}', mas a unidade selecionada é '{unidade['nome']}'. "
                "Confira se escolheu a unidade e o arquivo corretos.")
         return ResultadoImportacao("erro", msg, erros=[msg], **base)
@@ -137,12 +144,32 @@ def importar(repo: Repositorio, unidade_id: str, conteudo: bytes, nome_arquivo: 
                 pendencia("centro", nome, tipo_secao, ocorrencia, r.sugestoes)
         return cache_centro[k]
 
+    def centro_por_posicao(x):
+        """Centros da Matriz Custos Totais. Nome único: resolve direto. Nome repetido: a posição em relação ao
+        'Centro de Custos Externo' diz a seção (depois dele = final; antes = administrativo ou intermediário)."""
+        nome, pos = x["centro_bruto"], x["posicao"]
+        if not x["repetido"] or pos is None:
+            return centro(nome, None, x["ocorrencia"])
+        if pos in ("final", "externo"):
+            return centro(nome, pos, x["ocorrencia"])
+        for secao in ("administrativo", "intermediario"):
+            r = dims.resolver_centro(nome, secao, x["ocorrencia"])
+            if r.id is not None:
+                cache_centro[(nome, secao, x["ocorrencia"])] = r.id
+                return r.id
+        return centro(nome, "administrativo", x["ocorrencia"])   # gera a pendência (tipo_secao administrativo)
+
     uid = unidade_id
     if leitura.tipo == "custo_total_unidade":
         brutas = [((x["competencia"], item(x["item_bruto"])), x["valor"]) for x in leitura.linhas]
     elif leitura.tipo == "matriz_item_centro":
         brutas = [((x["competencia"], item(x["item_bruto"]), centro(x["centro_bruto"], None, x["ocorrencia"])), x["valor"])
                   for x in leitura.linhas]
+    elif leitura.tipo == "matriz_custos_totais":
+        brutas = []
+        for x in leitura.linhas:
+            cc = centro_por_posicao(x)
+            brutas.append(((x["competencia"], cc), (x["custo_direto"], x["custo_indireto"], x["custo_total"])))
     else:
         brutas = [((x["competencia"], centro(x["centro_bruto"], x["tipo_secao"]), x["item_producao"]),
                    (x["quantidade"], x["custo_unitario"])) for x in leitura.linhas]
@@ -163,6 +190,24 @@ def importar(repo: Repositorio, unidade_id: str, conteudo: bytes, nome_arquivo: 
         soma = _agregar(brutas)
         linhas = [dict(unidade_id=uid, competencia=c, ic_id=i, cc_id=cc, valor=v, importacao_id=importacao_id)
                   for (c, i, cc), v in soma.items()]
+    elif leitura.tipo == "matriz_custos_totais":
+        acum: dict = {}
+        for (c, cc), (cd, ci, ct) in brutas:      # dois centros locais para o mesmo centro padrão: somam
+            a = acum.setdefault((c, cc), [Decimal(0)] * 3)
+            a[0] += cd; a[1] += ci; a[2] += ct
+        linhas = [dict(unidade_id=uid, competencia=c, cc_id=cc, custo_direto=a[0], custo_indireto=a[1],
+                       custo_total=a[2], importacao_id=importacao_id) for (c, cc), a in acum.items()]
+        # 4b. O Custo Direto total da matriz deve bater com o total dos itens do mês (protege contra mês/unidade errados)
+        comp = leitura.inicio
+        total_itens = repo.total_itens_mes(unidade_id, comp)
+        soma_cd = sum((l["custo_direto"] for l in linhas), Decimal(0))
+        if total_itens is None:
+            base["avisos"].append(f"O Custo Total da Unidade de {comp:%m/%Y} ainda não foi importado: não foi possível "
+                                  "conferir se o mês e a unidade deste arquivo estão corretos.")
+        elif abs(soma_cd - total_itens) > TOLERANCIA_ITENS:
+            msg = (f"O Custo Direto total da matriz ({soma_cd}) não bate com o total dos itens de {comp:%m/%Y} "
+                   f"({total_itens}), diferença de {soma_cd - total_itens}. Confira se o mês informado e a unidade estão certos; nada foi gravado.")
+            return encerrar("erro", msg, erros=[msg])
     else:
         grupos = defaultdict(list)
         for (c, cc, ip), (q, cu) in brutas:
