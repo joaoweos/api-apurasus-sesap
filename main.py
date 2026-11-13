@@ -128,7 +128,8 @@ def quem_sou_eu(usuario_email: str = Query(...), repo=Depends(get_repo)):
     except AcessoNegado as e:
         _negar(e)
     repo.tocar_acesso(u["email"])
-    nomes = {x["id"]: x["nome"] for x in repo.listar_unidades()}
+    todas = repo.listar_unidades()
+    nomes = {x["id"]: x["nome"] for x in todas}
     vinculos = [{"papel": v["papel"], "papel_rotulo": ROTULOS[v["papel"]], "unidade_id": v.get("unidade_id"),
                  "unidade_nome": nomes.get(v.get("unidade_id"))} for v in u["vinculos"]]
     gestor = any(v["papel"] == "gestor_unidade" for v in u["vinculos"])
@@ -136,6 +137,8 @@ def quem_sou_eu(usuario_email: str = Query(...), repo=Depends(get_repo)):
     return {"email": u["email"], "nome": u.get("nome"), "papel": u["papel"], "papel_rotulo": ROTULOS[u["papel"]],
             "unidade": ({"id": unidade["id"], "nome": unidade["nome"]} if unidade else None),  # só quando tem uma unidade
             "vinculos": vinculos,
+            # SESAP escolhe entre todas as unidades: já vai aqui para o app não precisar de outra chamada
+            "unidades": ([{"id": x["id"], "nome": x["nome"]} for x in todas] if eh_sesap(u) else None),
             "permissoes": {
                 "ver_todas_unidades": eh_sesap(u),
                 "importar": u["papel"] == "master_sesap" or gestor,
@@ -315,30 +318,50 @@ def _exigir_data(valor: Optional[str], campo: str):
         raise HTTPException(status_code=422, detail=f"{campo} deve ser o primeiro dia do mês, no formato AAAA-MM-01.")
 
 
+def _resolver_visao(u, visao, unidade_id):
+    """Devolve (view, ordem, unidade) da visão pedida, já conferindo o direito do usuário."""
+    if visao in VISOES_MASTER:
+        exigir_sesap(u)   # comparativo: master e analista da SESAP
+        view, ordem = VISOES_MASTER[visao]
+        uid = str(unidade_id) if unidade_id else None   # opcional: filtra uma unidade
+    elif visao in VISOES:
+        view, ordem = VISOES[visao]
+        uid = unidade_permitida(u, unidade_id, escrita=False)
+    else:
+        raise HTTPException(status_code=404, detail=f"Visão desconhecida: {visao}.")
+    return view, ordem, uid
+
+
+MAX_LOTE = 6
+
+
 @app.get("/painel/{visao}", dependencies=[Depends(exigir_chave)])
 def painel(visao: str, usuario_email: str = Query(...), unidade_id: Optional[str] = Query(default=None),
            competencia: Optional[str] = Query(default=None), de: Optional[str] = Query(default=None),
            ate: Optional[str] = Query(default=None), repo=Depends(get_repo)):
     """Dados prontos para as telas. Qualquer perfil lê, mas só a unidade a que tem direito.
-    `comparativo` (todas as unidades) é exclusivo da equipe da SESAP (master e analista)."""
+    `comparativo` (todas as unidades) é exclusivo da equipe da SESAP (master e analista).
+
+    Lote (economiza chamadas): `lote:total-mensal,grupos,completude` devolve um objeto
+    {visão: linhas} com todas as visões pedidas, em uma única requisição."""
     for v, c in ((competencia, "competencia"), (de, "de"), (ate, "ate")):
         _exigir_data(v, c)
+    nomes = None
+    if visao.startswith("lote:"):
+        nomes = [n for n in visao[5:].split(",") if n]
+        if not nomes or len(nomes) > MAX_LOTE or len(set(nomes)) != len(nomes):
+            raise HTTPException(status_code=422, detail=f"Informe de 1 a {MAX_LOTE} visões diferentes no lote.")
     try:
         u = usuario_ativo(repo, usuario_email)
-        if visao in VISOES_MASTER:
-            exigir_sesap(u)   # comparativo: master e analista da SESAP
-            view, ordem = VISOES_MASTER[visao]
-            uid = str(unidade_id) if unidade_id else None   # opcional: filtra uma unidade
-        elif visao in VISOES:
-            view, ordem = VISOES[visao]
-            uid = unidade_permitida(u, unidade_id, escrita=False)
-        else:
-            raise HTTPException(status_code=404, detail=f"Visão desconhecida: {visao}.")
+        planos = {n: _resolver_visao(u, n, unidade_id) for n in (nomes or [visao])}
     except AcessoNegado as e:
         _negar(e)
-    if uid:
-        _exigir_uuid(uid, "unidade_id")
-    return jsonable_encoder(repo.consultar_view(view, uid, "*", competencia, de, ate, ordem))
+    for _, _, uid in planos.values():
+        if uid:
+            _exigir_uuid(uid, "unidade_id")
+    consulta = {n: repo.consultar_view(view, uid, "*", competencia, de, ate, ordem)
+                for n, (view, ordem, uid) in planos.items()}
+    return jsonable_encoder(consulta if nomes else consulta[visao])
 
 
 class MesStatus(BaseModel):

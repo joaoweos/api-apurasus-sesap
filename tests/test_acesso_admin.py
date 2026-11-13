@@ -154,3 +154,30 @@ def test_centro_produto_dividido_por_tipo_nao_apaga_os_outros_arquivos():
     linhas = repo.linhas("fato_apurasus_custo_unitario")
     assert len(linhas) == 6
     assert sorted(float(l["quantidade"]) for l in linhas) == [8.0, 9.0, 10.0, 222.0, 300.0, 475.0]
+
+
+def test_painel_em_lote_e_eu_com_unidades(api):
+    c, repo = api
+    repo.views = {"v_total_mensal": [{"unidade_id": U1, "competencia": "2025-01-01", "total": 1}],
+                  "v_grupo_mensal": [{"unidade_id": U1, "competencia": "2025-01-01", "grupo": "x"}],
+                  "v_completude_mes": []}
+    lote = "lote:total-mensal,grupos,completude"
+    r = c.get("/painel/" + lote, headers=H, params={"usuario_email": "l@h.rn"})
+    assert r.status_code == 200
+    j = r.json()
+    assert set(j) == {"total-mensal", "grupos", "completude"} and len(j["total-mensal"]) == 1 and j["completude"] == []
+    # visão simples continua devolvendo a lista direto
+    r = c.get("/painel/total-mensal", headers=H, params={"usuario_email": "l@h.rn"})
+    assert isinstance(r.json(), list)
+    # direitos valem para cada visão do lote: leitura da unidade não pede comparativo nem outra unidade
+    r = c.get("/painel/lote:total-mensal,comparativo", headers=H, params={"usuario_email": "l@h.rn"})
+    assert r.status_code == 403
+    r = c.get("/painel/lote:total-mensal", headers=H, params={"usuario_email": "l@h.rn", "unidade_id": U2})
+    assert r.status_code == 403
+    # lote inválido
+    assert c.get("/painel/lote:", headers=H, params={"usuario_email": "l@h.rn"}).status_code == 422
+    assert c.get("/painel/lote:grupos,grupos", headers=H, params={"usuario_email": "l@h.rn"}).status_code == 422
+    assert c.get("/painel/lote:grupos,nada", headers=H, params={"usuario_email": "l@h.rn"}).status_code == 404
+    # /eu: SESAP recebe a lista de unidades; quem é de unidade, não
+    assert {u["id"] for u in c.get("/eu", headers=H, params={"usuario_email": "m@s.rn"}).json()["unidades"]} == {U1, U2}
+    assert c.get("/eu", headers=H, params={"usuario_email": "l@h.rn"}).json()["unidades"] is None
