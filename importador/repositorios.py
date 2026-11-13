@@ -130,9 +130,10 @@ class RepositorioMemoria:
     def substituir_pendencias(self, importacao_id, pendencias):
         self.pendencias[importacao_id] = pendencias
 
-    def apagar(self, tabela, unidade_id, competencias):
+    def apagar(self, tabela, unidade_id, competencias, cc_ids=None):
         t = self.tabelas.setdefault(tabela, {})
-        for k in [k for k, l in t.items() if l["unidade_id"] == unidade_id and l["competencia"] in competencias]:
+        for k in [k for k, l in t.items() if l["unidade_id"] == unidade_id and l["competencia"] in competencias
+                  and (cc_ids is None or l.get("cc_id") in cc_ids)]:
             del t[k]
 
     def upsert(self, tabela, linhas, conflito):
@@ -303,8 +304,11 @@ class RepositorioSupabase:
                       tipo_secao=p.get("tipo_secao"), ocorrencia=p.get("ocorrencia", 1), sugestoes=p.get("sugestoes", []))
                  for p in pendencias]).execute()
 
-    def apagar(self, tabela, unidade_id, competencias):
-        self.sb.table(tabela).delete().eq("unidade_id", unidade_id).in_("competencia", [c.isoformat() for c in competencias]).execute()
+    def apagar(self, tabela, unidade_id, competencias, cc_ids=None):
+        q = self.sb.table(tabela).delete().eq("unidade_id", unidade_id).in_("competencia", [c.isoformat() for c in competencias])
+        if cc_ids is not None:
+            q = q.in_("cc_id", list(cc_ids))
+        q.execute()
 
     def upsert(self, tabela, linhas, conflito):
         for i in range(0, len(linhas), self.LOTE):

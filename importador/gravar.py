@@ -231,7 +231,11 @@ def importar(repo: Repositorio, unidade_id: str, conteudo: bytes, nome_arquivo: 
 
     # 6. Gravar
     competencias = sorted({l["competencia"] for l in linhas})
-    if leitura.tipo in APAGAR_ANTES:
+    if leitura.tipo == "centro_produto":
+        # O relatório pode vir dividido por tipo de centro (administrativo, intermediário, final) para os mesmos
+        # meses: cada arquivo substitui só os centros que traz, sem apagar os dos outros arquivos.
+        repo.apagar(tabela, unidade_id, competencias, sorted({l["cc_id"] for l in linhas}))
+    elif leitura.tipo in APAGAR_ANTES:
         repo.apagar(tabela, unidade_id, competencias)
     repo.upsert(tabela, linhas, conflito)
     repo.garantir_mes_status(unidade_id, competencias)

@@ -121,3 +121,36 @@ def test_email_invalido_e_papel_invalido(api):
     assert vinc(c, "m@s.rn", "sem-arroba", "analista_sesap").status_code == 422
     assert vinc(c, "m@s.rn", "x@x.rn", "deus").status_code == 403
     assert vinc(c, "m@s.rn", "x@x.rn", "gestor_unidade").status_code == 403   # papel de unidade sem unidade
+
+
+def test_centro_produto_dividido_por_tipo_nao_apaga_os_outros_arquivos():
+    """Três arquivos (administrativo, intermediário, final) dos mesmos meses devem somar, não se substituir."""
+    from importador.gravar import importar
+    U = "33333333-3333-3333-3333-333333333333"
+    centros = [{"id": "c1", "nome": "Almoxarifado", "tipo": "administrativo", "item_producao_padrao": "Item Atendido"},
+               {"id": "c1b", "nome": "Compras", "tipo": "administrativo", "item_producao_padrao": "Processo de Compras"},
+               {"id": "c2", "nome": "Radiologia", "tipo": "intermediario", "item_producao_padrao": "Exame"},
+               {"id": "c2b", "nome": "Hemodiálise", "tipo": "intermediario", "item_producao_padrao": "Sessão"},
+               {"id": "c3", "nome": "UTI Adulto", "tipo": "final", "item_producao_padrao": "Paciente/Dia"},
+               {"id": "c3b", "nome": "Centro Cirúrgico", "tipo": "final", "item_producao_padrao": "Cirurgia"}]
+    repo = RepositorioMemoria([{"id": U, "nome": "HJPB", "nome_no_apurasus": "HOSPITAL TESTE"}], centros, [])
+
+    def arq(tipo, linhas):   # sem linhas em branco: o leitor detecta o separador pela proporção de ';'
+        txt = (f"Instituição: HOSPITAL TESTE\nTipo Centro Custo: {tipo}\nPeriodo de : 01/2026 a 01/2026\n01/2026\n"
+               f"Centro Custo;Item Produção;Quantidade;Valor\n{tipo}\n" + "\n".join(linhas) + "\n")
+        return txt.encode("latin-1")
+
+    envios = (("Administrativo", ["Almoxarifado;Item Atendido;10;4,38", "Compras;Processo de Compras;8;1244,44"]),
+              ("Intermediário", ["Radiologia;Exame;475;409,02", "Hemodiálise;Sessão;222;1121,90"]),
+              ("Final", ["UTI Adulto;Paciente/Dia;8,26;107257,49", "Centro Cirúrgico;Cirurgia;321;4749,66"]))
+    for tipo, linhas in envios:
+        r = importar(repo, U, arq(tipo, linhas), f"{tipo}.csv", None, "x@x.rn", False, None)
+        assert r.status == "concluido", r
+    assert len(repo.linhas("fato_apurasus_custo_unitario")) == 6
+    # reprocessar só o final substitui só os centros do final
+    r = importar(repo, U, arq("Final", ["UTI Adulto;Paciente/Dia;9;100000,00", "Centro Cirúrgico;Cirurgia;300;5000,00"]),
+                 "Final2.csv", None, "x@x.rn", True, None)
+    assert r.status == "concluido", r
+    linhas = repo.linhas("fato_apurasus_custo_unitario")
+    assert len(linhas) == 6
+    assert sorted(float(l["quantidade"]) for l in linhas) == [8.0, 9.0, 10.0, 222.0, 300.0, 475.0]
