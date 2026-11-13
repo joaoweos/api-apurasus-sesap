@@ -1,0 +1,123 @@
+import os
+
+import pytest
+from fastapi.testclient import TestClient
+
+os.environ["API_KEY"] = "chave-de-teste"
+import main  # noqa: E402
+from importador.repositorios import RepositorioMemoria  # noqa: E402
+
+H = {"X-API-Key": "chave-de-teste"}
+U1, U2 = "11111111-1111-1111-1111-111111111111", "22222222-2222-2222-2222-222222222222"
+
+
+def _v(papel, uid=None):
+    return {"papel": papel, "unidade_id": uid, "ativo": True}
+
+
+@pytest.fixture
+def api():
+    repo = RepositorioMemoria(
+        [{"id": U1, "nome": "HJPB"}, {"id": U2, "nome": "HGT"}], [], [],
+        usuarios=[
+            {"email": "m@s.rn", "nome": "M", "ativo": True, "vinculos": [_v("master_sesap")]},
+            {"email": "a@s.rn", "nome": "A", "ativo": True, "vinculos": [_v("analista_sesap")]},
+            {"email": "g@h.rn", "nome": "G", "ativo": True, "vinculos": [_v("gestor_unidade", U1)]},
+            {"email": "l@h.rn", "nome": "L", "ativo": True, "vinculos": [_v("leitura_unidade", U1)]},
+            {"email": "t@s.rn", "nome": "T", "ativo": True,
+             "vinculos": [_v("leitura_unidade", U1), _v("gestor_unidade", U2)]},
+        ])
+    main.app.dependency_overrides[main.get_repo] = lambda: repo
+    yield TestClient(main.app), repo
+    main.app.dependency_overrides.clear()
+
+
+def vinc(c, ator, email, papel, uid=None, ativo=True):
+    return c.post("/admin/usuarios/vinculo", headers=H, json={"usuario_email": ator, "email": email, "papel": papel,
+                                                              "unidade_id": uid, "ativo": ativo})
+
+
+def test_analista_le_tudo_mas_nao_escreve(api):
+    c, _ = api
+    assert c.get("/painel/comparativo", headers=H, params={"usuario_email": "a@s.rn"}).status_code == 200
+    assert c.get("/painel/total-mensal", headers=H, params={"usuario_email": "a@s.rn", "unidade_id": U2}).status_code == 200
+    r = c.post("/painel/mes-status", headers=H, json={"usuario_email": "a@s.rn", "competencia": "2025-11-01",
+                                                      "status": "parcial", "unidade_id": U1})
+    assert r.status_code == 403
+    assert vinc(c, "a@s.rn", "x@x.rn", "leitura_unidade", U1).status_code == 403
+
+
+def test_leitura_e_gestor_nao_veem_comparativo_nem_outra_unidade(api):
+    c, _ = api
+    for e in ("l@h.rn", "g@h.rn"):
+        assert c.get("/painel/comparativo", headers=H, params={"usuario_email": e}).status_code == 403
+        assert c.get("/painel/total-mensal", headers=H, params={"usuario_email": e, "unidade_id": U2}).status_code == 403
+        assert c.get("/painel/total-mensal", headers=H, params={"usuario_email": e}).status_code == 200
+
+
+def test_multiunidade_exige_informar_unidade_e_respeita_papel_por_unidade(api):
+    c, _ = api
+    assert c.get("/painel/total-mensal", headers=H, params={"usuario_email": "t@s.rn"}).status_code == 403
+    assert c.get("/painel/total-mensal", headers=H, params={"usuario_email": "t@s.rn", "unidade_id": U1}).status_code == 200
+    mes = {"competencia": "2025-11-01", "status": "parcial", "usuario_email": "t@s.rn"}
+    assert c.post("/painel/mes-status", headers=H, json={**mes, "unidade_id": U1}).status_code == 403  # leitura em U1
+    assert c.post("/painel/mes-status", headers=H, json={**mes, "unidade_id": U2}).status_code == 200  # gestor em U2
+    eu = c.get("/eu", headers=H, params={"usuario_email": "t@s.rn"}).json()
+    assert len(eu["vinculos"]) == 2 and eu["unidade"] is None and eu["permissoes"]["gerir_usuarios"] is True
+
+
+def test_master_cadastra_qualquer_perfil_e_audita(api):
+    c, repo = api
+    assert vinc(c, "m@s.rn", "novo@s.rn", "analista_sesap").status_code == 200
+    assert vinc(c, "m@s.rn", "novo@h.rn", "gestor_unidade", U2).status_code == 200
+    assert c.get("/eu", headers=H, params={"usuario_email": "Novo@S.rn "}).json()["papel"] == "analista_sesap"
+    assert [a["acao"] for a in repo.listar_auditoria()][:2] == ["vinculo_salvo", "vinculo_salvo"]
+
+
+def test_gestor_so_cadastra_leitura_da_propria_unidade(api):
+    c, _ = api
+    assert vinc(c, "g@h.rn", "n@h.rn", "leitura_unidade", U1).status_code == 200
+    assert vinc(c, "g@h.rn", "n@h.rn", "gestor_unidade", U1).status_code == 403
+    assert vinc(c, "g@h.rn", "n@h.rn", "master_sesap").status_code == 403
+    assert vinc(c, "g@h.rn", "n@h.rn", "leitura_unidade", U2).status_code == 403
+    assert vinc(c, "l@h.rn", "n2@h.rn", "leitura_unidade", U1).status_code == 403
+    # não mexe em quem tem outro papel na unidade
+    assert vinc(c, "g@h.rn", "g@h.rn", "leitura_unidade", U1).status_code == 403
+    # desativa leitura
+    assert vinc(c, "g@h.rn", "l@h.rn", "leitura_unidade", U1, ativo=False).status_code == 200
+    assert c.get("/eu", headers=H, params={"usuario_email": "l@h.rn"}).status_code == 403
+
+
+def test_listagem_do_gestor_so_mostra_a_unidade_dele(api):
+    c, _ = api
+    r = c.get("/admin/usuarios", headers=H, params={"usuario_email": "g@h.rn"}).json()
+    assert {x["email"] for x in r} == {"g@h.rn", "l@h.rn", "t@s.rn"}
+    t = next(x for x in r if x["email"] == "t@s.rn")
+    assert [v["unidade_id"] for v in t["vinculos"]] == [U1]   # não revela o vínculo dele com a outra unidade
+    assert c.get("/admin/usuarios", headers=H, params={"usuario_email": "l@h.rn"}).status_code == 403
+    assert len(c.get("/admin/usuarios", headers=H, params={"usuario_email": "m@s.rn"}).json()) == 5
+
+
+def test_travas_do_master_e_bloqueio(api):
+    c, _ = api
+    assert vinc(c, "m@s.rn", "m@s.rn", "master_sesap", ativo=False).status_code == 403
+    assert c.post("/admin/usuarios/ativo", headers=H, json={"usuario_email": "m@s.rn", "email": "m@s.rn", "ativo": False}).status_code == 403
+    assert c.post("/admin/usuarios/ativo", headers=H, json={"usuario_email": "m@s.rn", "email": "l@h.rn", "ativo": False}).status_code == 200
+    assert c.get("/eu", headers=H, params={"usuario_email": "l@h.rn"}).status_code == 403
+    assert c.post("/admin/usuarios/ativo", headers=H, json={"usuario_email": "g@h.rn", "email": "l@h.rn", "ativo": True}).status_code == 403
+
+
+def test_unidades_so_master(api):
+    c, _ = api
+    corpo = {"usuario_email": "m@s.rn", "nome": "Hospital X", "sigla": "HX"}
+    assert c.post("/admin/unidades", headers=H, json=corpo).status_code == 200
+    assert len(c.get("/admin/unidades", headers=H, params={"usuario_email": "m@s.rn"}).json()) == 3
+    assert c.post("/admin/unidades", headers=H, json={**corpo, "usuario_email": "g@h.rn"}).status_code == 403
+    assert c.get("/admin/auditoria", headers=H, params={"usuario_email": "a@s.rn"}).status_code == 403
+
+
+def test_email_invalido_e_papel_invalido(api):
+    c, _ = api
+    assert vinc(c, "m@s.rn", "sem-arroba", "analista_sesap").status_code == 422
+    assert vinc(c, "m@s.rn", "x@x.rn", "deus").status_code == 403
+    assert vinc(c, "m@s.rn", "x@x.rn", "gestor_unidade").status_code == 403   # papel de unidade sem unidade

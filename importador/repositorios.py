@@ -1,6 +1,7 @@
 """Acesso a dados: uma versão em memória (testes) e uma para o Supabase."""
 from __future__ import annotations
 
+import logging
 import uuid
 from datetime import date, datetime, timezone
 from decimal import Decimal
@@ -43,7 +44,62 @@ class RepositorioMemoria:
         return self.usuarios.get(email)
 
     def listar_unidades(self):
-        return [{"id": u["id"], "nome": u["nome"]} for u in self.unidades.values()]
+        return [{"id": u["id"], "nome": u["nome"]} for u in self.unidades.values() if u.get("ativa", True)]
+
+    # --- cadastro de usuários, vínculos e unidades (tela de administração)
+    def _usuario_completo(self, u):
+        if "vinculos" not in u:
+            u["vinculos"] = [{"papel": u["papel"], "unidade_id": u.get("unidade_id"), "ativo": True}]
+        return {"email": u["email"], "nome": u.get("nome"), "ativo": u.get("ativo", True),
+                "vinculos": [dict(v, unidade_nome=(self.unidades.get(v.get("unidade_id")) or {}).get("nome"))
+                             for v in u["vinculos"]]}
+
+    def listar_usuarios(self, unidades=None):
+        r = []
+        for u in self.usuarios.values():
+            c = self._usuario_completo(u)
+            if unidades is not None:
+                c["vinculos"] = [v for v in c["vinculos"] if str(v.get("unidade_id")) in unidades]
+                if not c["vinculos"]:
+                    continue
+            r.append(c)
+        return sorted(r, key=lambda x: x["email"])
+
+    def salvar_usuario(self, email, nome=None, ator=None):
+        u = self.usuarios.setdefault(email, {"email": email, "nome": nome, "ativo": True, "vinculos": []})
+        if nome and not u.get("nome"):
+            u["nome"] = nome
+
+    def salvar_vinculo(self, email, unidade_id, papel, ativo=True, ator=None):
+        u = self.usuarios[email]
+        self._usuario_completo(u)
+        for v in u["vinculos"]:
+            if str(v.get("unidade_id")) == str(unidade_id):
+                v.update(papel=papel, ativo=ativo)
+                return
+        u["vinculos"].append({"papel": papel, "unidade_id": unidade_id, "ativo": ativo})
+
+    def definir_usuario_ativo(self, email, ativo):
+        self.usuarios[email]["ativo"] = ativo
+
+    def listar_unidades_todas(self):
+        return [dict(u) for u in self.unidades.values()]
+
+    def salvar_unidade(self, d):
+        i = d.get("id") or str(uuid.uuid4())
+        self.unidades[i] = dict(self.unidades.get(i, {}), **{k: v for k, v in d.items() if v is not None}, id=i)
+        return self.unidades[i]
+
+    def registrar_auditoria(self, ator, acao, alvo=None, unidade_id=None, papel=None, detalhe=None):
+        self.auditoria = getattr(self, "auditoria", [])
+        self.auditoria.append({"ator_email": ator, "acao": acao, "alvo_email": alvo, "unidade_id": unidade_id,
+                               "papel": papel, "detalhe": detalhe})
+
+    def listar_auditoria(self, limite=100):
+        return list(reversed(getattr(self, "auditoria", [])))[:limite]
+
+    def tocar_acesso(self, email):
+        pass
 
     def centro_existe(self, cc_id):
         return any(c["id"] == cc_id for c in self.centros)
@@ -150,8 +206,70 @@ class RepositorioSupabase:
         return self.sb.table("unidades").select("id,nome").eq("ativa", True).order("nome").execute().data
 
     def obter_usuario(self, email):
-        d = self.sb.table("usuarios_unidade").select("email,nome,unidade_id,papel,ativo").eq("email", email).limit(1).execute().data
-        return d[0] if d else None
+        d = self.sb.table("usuarios").select("email,nome,ativo").eq("email", email).limit(1).execute().data
+        if not d:
+            return None
+        v = (self.sb.table("usuario_vinculos").select("papel,unidade_id,ativo").eq("email", email).execute().data)
+        return dict(d[0], vinculos=v)
+
+    # --- cadastro de usuários, vínculos e unidades (tela de administração)
+    def listar_usuarios(self, unidades=None):
+        us = self.sb.table("usuarios").select("email,nome,ativo").order("email").limit(5000).execute().data
+        vs = self.sb.table("usuario_vinculos").select("email,papel,unidade_id,ativo").limit(5000).execute().data
+        nomes = {x["id"]: x["nome"] for x in self.sb.table("unidades").select("id,nome").execute().data}
+        por = {}
+        for v in vs:
+            if unidades is not None and str(v["unidade_id"]) not in unidades:
+                continue
+            por.setdefault(v["email"], []).append(
+                {"papel": v["papel"], "unidade_id": v["unidade_id"], "ativo": v["ativo"],
+                 "unidade_nome": nomes.get(v["unidade_id"])})
+        return [dict(u, vinculos=por[u["email"]]) for u in us if u["email"] in por or unidades is None]
+
+    def salvar_usuario(self, email, nome=None, ator=None):
+        existe = self.sb.table("usuarios").select("email").eq("email", email).limit(1).execute().data
+        if not existe:
+            self.sb.table("usuarios").insert({"email": email, "nome": nome, "criado_por": ator}).execute()
+
+    def salvar_vinculo(self, email, unidade_id, papel, ativo=True, ator=None):
+        q = self.sb.table("usuario_vinculos").select("id").eq("email", email)
+        q = q.eq("unidade_id", unidade_id) if unidade_id else q.is_("unidade_id", "null")
+        existente = q.limit(1).execute().data
+        if existente:
+            self.sb.table("usuario_vinculos").update({"papel": papel, "ativo": ativo}).eq("id", existente[0]["id"]).execute()
+        else:
+            self.sb.table("usuario_vinculos").insert(
+                {"email": email, "unidade_id": unidade_id, "papel": papel, "ativo": ativo, "criado_por": ator}).execute()
+
+    def definir_usuario_ativo(self, email, ativo):
+        self.sb.table("usuarios").update({"ativo": ativo}).eq("email", email).execute()
+
+    def listar_unidades_todas(self):
+        return self.sb.table("unidades").select("id,nome,nome_no_apurasus,sigla,cnes,ativa").order("nome").execute().data
+
+    def salvar_unidade(self, d):
+        campos = {k: v for k, v in d.items() if k != "id" and v is not None}
+        if d.get("id"):
+            return self.sb.table("unidades").update(campos).eq("id", d["id"]).execute().data[0]
+        return self.sb.table("unidades").insert(campos).execute().data[0]
+
+    def registrar_auditoria(self, ator, acao, alvo=None, unidade_id=None, papel=None, detalhe=None):
+        try:
+            self.sb.table("auditoria_acessos").insert(
+                {"ator_email": ator, "acao": acao, "alvo_email": alvo, "unidade_id": unidade_id,
+                 "papel": papel, "detalhe": detalhe}).execute()
+        except Exception:  # a auditoria nunca deve derrubar a operação principal
+            logging.exception("Falha ao registrar auditoria")
+
+    def listar_auditoria(self, limite=100):
+        return (self.sb.table("auditoria_acessos").select("*").order("created_at", desc=True)
+                .limit(limite).execute().data)
+
+    def tocar_acesso(self, email):
+        try:
+            self.sb.table("usuarios").update({"ultimo_acesso": datetime.now(timezone.utc).isoformat()}).eq("email", email).execute()
+        except Exception:
+            pass
 
     def listar_importacoes(self, unidade_id, limite=20):
         return (self.sb.table("importacoes")

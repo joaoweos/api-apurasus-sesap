@@ -3,7 +3,7 @@ API Consolidador SESAP - relatórios do ApuraSUS
 -----------------------------------------------
 Recebe os relatórios brutos (CSV) do ApuraSUS, confere, casa os nomes com os
 cadastros padrão e grava no Supabase. Quem pode fazer o quê é decidido aqui
-(importador/acesso.py), a partir do e-mail do usuário e da tabela usuarios_unidade.
+(importador/acesso.py), a partir do e-mail do usuário e das tabelas usuarios / usuario_vinculos.
 
 Variáveis de ambiente (Render > Environment):
   SUPABASE_URL, SUPABASE_SERVICE_KEY, API_KEY, CORS_ORIGINS
@@ -23,7 +23,9 @@ from fastapi.responses import JSONResponse
 from pydantic import BaseModel
 
 from importador import ArquivoInvalido, ler_relatorio
-from importador.acesso import AcessoNegado, exigir_master, unidade_permitida, usuario_ativo
+from importador.acesso import (AcessoNegado, PAPEIS, PAPEIS_SESAP, ROTULOS, eh_sesap, exigir_gestao_de_vinculo,
+                               exigir_master, exigir_sesap, normalizar_email, papel_na_unidade, unidade_permitida,
+                               unidades_do_usuario, usuario_ativo)
 from importador.gravar import importar
 from importador.repositorios import RepositorioSupabase
 
@@ -120,27 +122,39 @@ def home():
 # ---------------------------------------------------------------------------
 @app.get("/eu", dependencies=[Depends(exigir_chave)])
 def quem_sou_eu(usuario_email: str = Query(...), repo=Depends(get_repo)):
-    """Perfil do usuário e a unidade dele, para o app montar as telas."""
+    """Perfil, vínculos e permissões do usuário, para o app montar o menu e as telas."""
     try:
         u = usuario_ativo(repo, usuario_email)
     except AcessoNegado as e:
         _negar(e)
+    repo.tocar_acesso(u["email"])
+    nomes = {x["id"]: x["nome"] for x in repo.listar_unidades()}
+    vinculos = [{"papel": v["papel"], "papel_rotulo": ROTULOS[v["papel"]], "unidade_id": v.get("unidade_id"),
+                 "unidade_nome": nomes.get(v.get("unidade_id"))} for v in u["vinculos"]]
+    gestor = any(v["papel"] == "gestor_unidade" for v in u["vinculos"])
     unidade = repo.obter_unidade(u["unidade_id"]) if u.get("unidade_id") else None
-    return {"email": u["email"], "nome": u.get("nome"), "papel": u["papel"],
-            "unidade": ({"id": unidade["id"], "nome": unidade["nome"]} if unidade else None)}
+    return {"email": u["email"], "nome": u.get("nome"), "papel": u["papel"], "papel_rotulo": ROTULOS[u["papel"]],
+            "unidade": ({"id": unidade["id"], "nome": unidade["nome"]} if unidade else None),  # só quando tem uma unidade
+            "vinculos": vinculos,
+            "permissoes": {
+                "ver_todas_unidades": eh_sesap(u),
+                "importar": u["papel"] == "master_sesap" or gestor,
+                "comparativo": eh_sesap(u),
+                "gerir_usuarios": u["papel"] == "master_sesap" or gestor,
+                "gerir_unidades": u["papel"] == "master_sesap",
+            }}
 
 
 @app.get("/unidades", dependencies=[Depends(exigir_chave)])
 def listar_unidades(usuario_email: str = Query(...), repo=Depends(get_repo)):
-    """Unidades que o usuário pode escolher: todas para o master, só a própria para os demais."""
+    """Unidades que o usuário pode escolher: todas para a SESAP, só as dos vínculos para os demais."""
     try:
         u = usuario_ativo(repo, usuario_email)
     except AcessoNegado as e:
         _negar(e)
-    if u["papel"] == "master_sesap":
-        return repo.listar_unidades()
-    un = repo.obter_unidade(u["unidade_id"])
-    return [{"id": un["id"], "nome": un["nome"]}] if un else []
+    todas = repo.listar_unidades()
+    ids = unidades_do_usuario(u)
+    return todas if ids is None else [x for x in todas if str(x["id"]) in ids]
 
 
 @app.get("/dimensoes", dependencies=[Depends(exigir_chave)])
@@ -306,13 +320,13 @@ def painel(visao: str, usuario_email: str = Query(...), unidade_id: Optional[str
            competencia: Optional[str] = Query(default=None), de: Optional[str] = Query(default=None),
            ate: Optional[str] = Query(default=None), repo=Depends(get_repo)):
     """Dados prontos para as telas. Qualquer perfil lê, mas só a unidade a que tem direito.
-    `comparativo` (todas as unidades) é exclusivo do master."""
+    `comparativo` (todas as unidades) é exclusivo da equipe da SESAP (master e analista)."""
     for v, c in ((competencia, "competencia"), (de, "de"), (ate, "ate")):
         _exigir_data(v, c)
     try:
         u = usuario_ativo(repo, usuario_email)
         if visao in VISOES_MASTER:
-            exigir_master(u)
+            exigir_sesap(u)   # comparativo: master e analista da SESAP
             view, ordem = VISOES_MASTER[visao]
             uid = str(unidade_id) if unidade_id else None   # opcional: filtra uma unidade
         elif visao in VISOES:
@@ -362,3 +376,144 @@ def definir_mes_status(corpo: MesStatus, repo=Depends(get_repo)):
                     "Só o master da SESAP pode fechar mesmo assim."))
     repo.definir_mes_status(uid, corpo.competencia, corpo.status, corpo.observacao, u["email"])
     return {"sucesso": True}
+
+
+# ---------------------------------------------------------------------------
+# Administração: unidades, usuários e vínculos
+# ---------------------------------------------------------------------------
+_EMAIL = re.compile(r"^[^@\s]+@[^@\s]+\.[^@\s]+$")
+
+
+def _email_valido(email: str) -> str:
+    e = normalizar_email(email)
+    if not _EMAIL.match(e):
+        raise HTTPException(status_code=422, detail="E-mail inválido.")
+    return e
+
+
+@app.get("/admin/usuarios", dependencies=[Depends(exigir_chave)])
+def admin_listar_usuarios(usuario_email: str = Query(...), repo=Depends(get_repo)):
+    """Master vê todos; gestor vê só os usuários que têm vínculo nas unidades dele."""
+    try:
+        u = usuario_ativo(repo, usuario_email)
+        if u["papel"] == "master_sesap":
+            unidades = None
+        else:
+            unidades = sorted({str(v["unidade_id"]) for v in u["vinculos"] if v["papel"] == "gestor_unidade"})
+            if not unidades:
+                raise AcessoNegado("Seu perfil não permite gerir usuários.")
+    except AcessoNegado as e:
+        _negar(e)
+    return jsonable_encoder(repo.listar_usuarios(unidades))
+
+
+class VinculoIn(BaseModel):
+    usuario_email: str          # quem está fazendo a alteração
+    email: str                  # usuário que recebe o vínculo
+    papel: str                  # master_sesap | analista_sesap | gestor_unidade | leitura_unidade
+    unidade_id: Optional[str] = None   # obrigatório nos papéis de unidade; vazio nos da SESAP
+    nome: Optional[str] = None
+    ativo: bool = True          # false = retira o acesso àquela unidade/papel (mantém o histórico)
+
+
+@app.post("/admin/usuarios/vinculo", dependencies=[Depends(exigir_chave)])
+def admin_salvar_vinculo(corpo: VinculoIn, repo=Depends(get_repo)):
+    """Cria, altera ou desativa o vínculo (e-mail + papel + unidade). Cria o usuário se ainda não existe."""
+    alvo = _email_valido(corpo.email)
+    uid = corpo.unidade_id or None
+    if uid:
+        _exigir_uuid(uid, "unidade_id")
+    try:
+        u = usuario_ativo(repo, corpo.usuario_email)
+        exigir_gestao_de_vinculo(u, corpo.papel, uid)
+        if uid and not repo.obter_unidade(uid):
+            raise HTTPException(status_code=422, detail="Unidade não encontrada.")
+        # gestor só mexe em vínculo que já seja de leitura (não rebaixa/derruba outros papéis)
+        if u["papel"] != "master_sesap":
+            atual = repo.obter_usuario(alvo)
+            existente = next((v for v in (atual or {}).get("vinculos", []) if str(v.get("unidade_id")) == uid), None)
+            if existente and existente["papel"] != "leitura_unidade":
+                raise AcessoNegado("Este usuário tem outro perfil nessa unidade; só o master da SESAP pode alterá-lo.")
+        # trava de segurança: o master não pode tirar o próprio acesso de master
+        if alvo == u["email"] and corpo.papel == "master_sesap" and not corpo.ativo:
+            raise AcessoNegado("Você não pode desativar o seu próprio acesso de master.")
+    except AcessoNegado as e:
+        _negar(e)
+    repo.salvar_usuario(alvo, (corpo.nome or "").strip() or None, u["email"])
+    repo.salvar_vinculo(alvo, uid, corpo.papel, corpo.ativo, u["email"])
+    repo.registrar_auditoria(u["email"], "vinculo_salvo" if corpo.ativo else "vinculo_desativado",
+                             alvo, uid, corpo.papel)
+    return {"sucesso": True}
+
+
+class UsuarioAtivo(BaseModel):
+    usuario_email: str
+    email: str
+    ativo: bool
+
+
+@app.post("/admin/usuarios/ativo", dependencies=[Depends(exigir_chave)])
+def admin_usuario_ativo(corpo: UsuarioAtivo, repo=Depends(get_repo)):
+    """Bloqueia ou libera o usuário em todo o sistema (só o master)."""
+    alvo = _email_valido(corpo.email)
+    try:
+        u = usuario_ativo(repo, corpo.usuario_email)
+        exigir_master(u)
+        if alvo == u["email"] and not corpo.ativo:
+            raise AcessoNegado("Você não pode bloquear o seu próprio usuário.")
+    except AcessoNegado as e:
+        _negar(e)
+    if not repo.obter_usuario(alvo):
+        raise HTTPException(status_code=404, detail="Usuário não encontrado.")
+    repo.definir_usuario_ativo(alvo, corpo.ativo)
+    repo.registrar_auditoria(u["email"], "usuario_liberado" if corpo.ativo else "usuario_bloqueado", alvo)
+    return {"sucesso": True}
+
+
+@app.get("/admin/unidades", dependencies=[Depends(exigir_chave)])
+def admin_listar_unidades(usuario_email: str = Query(...), repo=Depends(get_repo)):
+    """Cadastro completo das unidades, inclusive as inativas (só o master)."""
+    try:
+        exigir_master(usuario_ativo(repo, usuario_email))
+    except AcessoNegado as e:
+        _negar(e)
+    return jsonable_encoder(repo.listar_unidades_todas())
+
+
+class UnidadeIn(BaseModel):
+    usuario_email: str
+    id: Optional[str] = None            # vazio = nova unidade
+    nome: str
+    nome_no_apurasus: Optional[str] = None   # como o hospital aparece no cabeçalho do ApuraSUS (confere o arquivo enviado)
+    sigla: Optional[str] = None
+    cnes: Optional[str] = None
+    ativa: bool = True
+
+
+@app.post("/admin/unidades", dependencies=[Depends(exigir_chave)])
+def admin_salvar_unidade(corpo: UnidadeIn, repo=Depends(get_repo)):
+    try:
+        u = usuario_ativo(repo, corpo.usuario_email)
+        exigir_master(u)
+    except AcessoNegado as e:
+        _negar(e)
+    if corpo.id:
+        _exigir_uuid(corpo.id, "id")
+    if not corpo.nome.strip():
+        raise HTTPException(status_code=422, detail="Informe o nome da unidade.")
+    un = repo.salvar_unidade({"id": corpo.id or None, "nome": corpo.nome.strip(),
+                              "nome_no_apurasus": (corpo.nome_no_apurasus or "").strip() or None,
+                              "sigla": (corpo.sigla or "").strip() or None, "cnes": (corpo.cnes or "").strip() or None,
+                              "ativa": corpo.ativa})
+    repo.registrar_auditoria(u["email"], "unidade_salva", None, str(un["id"]), None, {"nome": un.get("nome")})
+    return jsonable_encoder({"sucesso": True, "unidade": un})
+
+
+@app.get("/admin/auditoria", dependencies=[Depends(exigir_chave)])
+def admin_auditoria(usuario_email: str = Query(...), limite: int = Query(default=100, le=500), repo=Depends(get_repo)):
+    """Quem mudou o quê nos acessos (só o master)."""
+    try:
+        exigir_master(usuario_ativo(repo, usuario_email))
+    except AcessoNegado as e:
+        _negar(e)
+    return jsonable_encoder(repo.listar_auditoria(limite))
