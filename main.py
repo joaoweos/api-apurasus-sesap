@@ -27,6 +27,7 @@ from importador.acesso import (AcessoNegado, PAPEIS, PAPEIS_SESAP, ROTULOS, eh_s
                                exigir_master, exigir_sesap, normalizar_email, papel_na_unidade, unidade_permitida,
                                unidades_do_usuario, usuario_ativo)
 from importador.gravar import importar
+from importador.justificativas import JustificativaInvalida, validar as validar_justificativa
 from importador.repositorios import RepositorioSupabase
 
 app = FastAPI(title="API Consolidador SESAP - ApuraSUS")
@@ -308,6 +309,7 @@ VISOES = {
     "qualidade":      ("v_qualidade_mes", ["competencia"]),
     "centros-mensal": ("v_centro_mensal", ["competencia", "tipo", "centro"]),
     "tipos-centro":   ("v_tipo_centro_mensal", ["competencia", "tipo"]),
+    "justificativas": ("qualidade_justificativa", ["competencia", "tipo", "referencia_nome"]),
 }
 VISOES_MASTER = {"comparativo": ("v_comparativo_unidades", ["competencia", "centro"])}
 _DATA = re.compile(r"^\d{4}-\d{2}-01$")
@@ -399,6 +401,58 @@ def definir_mes_status(corpo: MesStatus, repo=Depends(get_repo)):
                     "Só o master da SESAP pode fechar mesmo assim."))
     repo.definir_mes_status(uid, corpo.competencia, corpo.status, corpo.observacao, u["email"])
     return {"sucesso": True}
+
+
+# ---------------------------------------------------------------------------
+# Justificativas dos alertas da Qualidade dos dados
+# ---------------------------------------------------------------------------
+_VERDADEIRO = {"true", "1", "sim", "yes"}
+
+
+@app.post("/qualidade/justificativa", dependencies=[Depends(exigir_chave)])
+def salvar_justificativa(
+    usuario_email: str = Form(...),
+    competencia: str = Form(...),          # AAAA-MM-01
+    tipo: str = Form(...),                 # item | centro
+    referencia: str = Form(...),           # centro: id do centro padrão; item: nome do item
+    referencia_nome: Optional[str] = Form(default=None),   # nome para exibir (o do centro ou do item)
+    motivo: Optional[str] = Form(default=None),
+    texto: Optional[str] = Form(default=None),
+    unidade_id: Optional[str] = Form(default=None),        # só vale para o master
+    remover: Optional[str] = Form(default=None),           # "true" apaga a justificativa
+    repo=Depends(get_repo),
+):
+    """Grava (ou apaga) a justificativa de um alerta. Só o gestor da unidade e o master escrevem;
+    SESAP e direção leem pelo painel (`/painel/justificativas`). Vale uma justificativa por item/centro/mês:
+    enviar de novo substitui a anterior."""
+    _exigir_data(competencia, "competencia")
+    apagar = (remover or "").strip().lower() in _VERDADEIRO
+    try:
+        u = usuario_ativo(repo, usuario_email)
+        uid = unidade_permitida(u, (unidade_id or None), escrita=True)
+    except AcessoNegado as e:
+        _negar(e)
+    _exigir_uuid(uid, "unidade_id")
+    try:
+        campos = validar_justificativa(tipo, referencia, motivo, texto, apagar)
+    except JustificativaInvalida as e:
+        raise HTTPException(status_code=422, detail=str(e))
+    if tipo == "centro" and not repo.centro_existe(campos["referencia"]):
+        raise HTTPException(status_code=422, detail="Centro não encontrado no cadastro padrão.")
+    if apagar:
+        removida = repo.remover_justificativa(uid, competencia, tipo, campos["referencia"])
+        repo.registrar_auditoria(u["email"], "justificativa_removida", None, uid, None,
+                                 {"competencia": competencia, "tipo": tipo, "referencia": campos["referencia"]})
+        return {"sucesso": True, "removida": removida}
+    linha = repo.salvar_justificativa(
+        {"unidade_id": uid, "competencia": competencia, "tipo": tipo, "referencia": campos["referencia"],
+         "referencia_nome": (referencia_nome or "").strip()[:200] or None,
+         "motivo": campos["motivo"], "texto": campos["texto"]}, u["email"])
+    repo.registrar_auditoria(u["email"], "justificativa_salva", None, uid, None,
+                             {"competencia": competencia, "tipo": tipo, "referencia": campos["referencia"],
+                              "motivo": campos["motivo"]})
+    return jsonable_encoder({"sucesso": True, "justificativa": linha})
+
 
 
 # ---------------------------------------------------------------------------

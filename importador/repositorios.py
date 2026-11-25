@@ -161,6 +161,25 @@ class RepositorioMemoria:
     def definir_mes_status(self, unidade_id, competencia, status, observacao, usuario):
         self.mes_status[(unidade_id, competencia)] = status
 
+    # --- justificativas dos alertas da Qualidade dos dados
+    def salvar_justificativa(self, d, usuario):
+        """Cria ou substitui a justificativa daquele item/centro naquele mês; devolve a linha gravada."""
+        lista = self.views.setdefault("qualidade_justificativa", [])
+        chave = (d["unidade_id"], d["competencia"], d["tipo"], d["referencia"])
+        antiga = next((l for l in lista if (l["unidade_id"], l["competencia"], l["tipo"], l["referencia"]) == chave), None)
+        nova = dict(d, status="justificado", criado_por=(antiga or {}).get("criado_por", usuario), atualizado_por=usuario)
+        if antiga:
+            lista.remove(antiga)
+        lista.append(nova)
+        return nova
+
+    def remover_justificativa(self, unidade_id, competencia, tipo, referencia):
+        lista = self.views.setdefault("qualidade_justificativa", [])
+        antes = len(lista)
+        lista[:] = [l for l in lista if (l["unidade_id"], l["competencia"], l["tipo"], l["referencia"])
+                    != (unidade_id, competencia, tipo, referencia)]
+        return len(lista) < antes
+
     def linhas(self, tabela):
         return list(self.tabelas.get(tabela, {}).values())
 
@@ -359,6 +378,30 @@ class RepositorioSupabase:
              "observacao": observacao, "atualizado_por": usuario,
              "updated_at": datetime.now(timezone.utc).isoformat()},
             on_conflict="unidade_id,competencia").execute()
+
+    # --- justificativas dos alertas da Qualidade dos dados
+    def _filtro_justificativa(self, q, unidade_id, competencia, tipo, referencia):
+        return (q.eq("unidade_id", unidade_id).eq("competencia", competencia)
+                .eq("tipo", tipo).eq("referencia", referencia))
+
+    def salvar_justificativa(self, d, usuario):
+        """Cria ou substitui a justificativa daquele item/centro naquele mês; devolve a linha gravada."""
+        agora = datetime.now(timezone.utc).isoformat()
+        existente = self._filtro_justificativa(
+            self.sb.table("qualidade_justificativa").select("id"),
+            d["unidade_id"], d["competencia"], d["tipo"], d["referencia"]).limit(1).execute().data
+        campos = {k: d.get(k) for k in ("referencia_nome", "motivo", "texto")}
+        campos.update(atualizado_por=usuario, updated_at=agora, status="justificado")
+        if existente:
+            return self.sb.table("qualidade_justificativa").update(campos).eq("id", existente[0]["id"]).execute().data[0]
+        novo = dict(campos, unidade_id=d["unidade_id"], competencia=d["competencia"], tipo=d["tipo"],
+                    referencia=d["referencia"], criado_por=usuario)
+        return self.sb.table("qualidade_justificativa").insert(novo).execute().data[0]
+
+    def remover_justificativa(self, unidade_id, competencia, tipo, referencia):
+        r = self._filtro_justificativa(self.sb.table("qualidade_justificativa").delete(),
+                                       unidade_id, competencia, tipo, referencia).execute().data
+        return bool(r)
 
     def listar_dimensoes(self):
         return {"centros": self._todas("dim_cc_pngc", "id,codigo,nome,tipo,item_producao_padrao"),
